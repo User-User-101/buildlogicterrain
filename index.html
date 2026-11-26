@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build Logic terrain generator</title>
+<style>
+:root{--bg:#eef2f4;--panel:#fff;--ink:#17262f;--mute:#5d707b;--line:#c9d4da;--acc:#1f6f8b;--ok:#2f7d4f;--bad:#b3392f}
+@media (prefers-color-scheme:dark){:root{--bg:#10191e;--panel:#18252c;--ink:#e3ecf0;--mute:#8fa3ad;--line:#2b3d46;--acc:#5fb4d1;--ok:#6cc58f;--bad:#ef8077}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif}
+main{max-width:1000px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:1.8rem;margin:0 0 4px;letter-spacing:-.01em}
+p.sub{margin:0 0 22px;color:var(--mute);max-width:60ch}
+.grid{display:grid;grid-template-columns:300px 1fr;gap:20px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
+label{display:flex;justify-content:space-between;font:14px system-ui,sans-serif;margin:12px 0 2px}
+label b{font-weight:600;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--acc)}
+input[type=number],select{width:100%;padding:6px;font:14px system-ui,sans-serif;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px}
+.row{display:flex;gap:8px}.row>*{flex:1}
+button{font:600 14px system-ui,sans-serif;padding:9px 14px;border-radius:4px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
+button.alt{background:transparent;color:var(--acc)}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+canvas{width:100%;image-rendering:pixelated;border:1px solid var(--line);border-radius:4px;background:var(--bg);aspect-ratio:1}
+textarea{width:100%;height:110px;margin-top:10px;font:12px ui-monospace,monospace;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:8px}
+.stats{font:14px system-ui,sans-serif;color:var(--mute);margin:10px 0 0}
+.warn{color:var(--bad)}
+#test{font:13px system-ui,sans-serif;margin-top:16px;color:var(--mute)}
+#test .ok{color:var(--ok)}#test .bad{color:var(--bad)}
+</style>
+</head>
+<body>
+<main>
+<h1>Build Logic terrain generator</h1>
+<p class="sub">Makes hills out of stacked blocks and gives you a save string to paste into the game. Everything runs in your browser.</p>
+<div class="grid">
+<section class="card" aria-label="Settings">
+<label for="w">Width (x) <b id="wv"></b></label><input id="w" type="range" min="4" max="64" value="32">
+<label for="d">Depth (y) <b id="dv"></b></label><input id="d" type="range" min="4" max="64" value="32">
+<label for="hm">Max height <b id="hv"></b></label><input id="hm" type="range" min="1" max="15" value="8">
+<label for="sc">Hill size <b id="sv"></b></label><input id="sc" type="range" min="3" max="40" value="14">
+<label for="oc">Roughness <b id="ov"></b></label><input id="oc" type="range" min="1" max="5" value="3">
+<label for="seed">Seed</label>
+<div class="row"><input id="seed" type="number" value="1234"><button class="alt" id="rnd" type="button">Random</button></div>
+<label for="fill">Fill</label>
+<select id="fill"><option value="skin">Surface only (fewer blocks)</option><option value="solid">Solid down to ground</option></select>
+<label>Start position (x, y)</label>
+<div class="row"><input id="ox" type="number" value="100" min="0" max="255" aria-label="Start x"><input id="oy" type="number" value="100" min="0" max="255" aria-label="Start y"></div>
+</section>
+<section class="card" aria-label="Result">
+<canvas id="cv" width="64" height="64" aria-label="Top-down height preview"></canvas>
+<div class="stats" id="stats"></div>
+<textarea id="out" readonly aria-label="Save string"></textarea>
+<div class="row" style="margin-top:10px"><button id="copy" type="button">Copy save string</button><button class="alt" id="gen" type="button">Regenerate</button></div>
+<div id="test"></div>
+</section>
+</div>
+</main>
+<script>
+// Save string format: reverse-engineered from samples, block id 43 only.
+// Entry = 'G' + 5 base64-style chars (6 bits each, lowest bits first).
+// Fields: x = bits 6-13, height = bits 14-17, y = bits 22-29. Raw values 0-255 (x, y), 0-15 (height).
+const AL="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$";
+function enc(x,y,h){
+  let v=6+x*64+h*16384+y*4194304, s="";
+  for(let i=0;i<6;i++){s+=AL[v%64];v=Math.floor(v/64)}
+  return s;
+}
+function hash(a,b,s){let t=(a*374761393+b*668265263+s*1274126177)|0;t=Math.imul(t^(t>>>13),1274126177);return((t^(t>>>16))>>>0)/4294967296}
+const sm=t=>t*t*(3-2*t);
+function vnoise(x,y,s){const xi=Math.floor(x),yi=Math.floor(y),fx=sm(x-xi),fy=sm(y-yi);
+  const a=hash(xi,yi,s),b=hash(xi+1,yi,s),c=hash(xi,yi+1,s),d=hash(xi+1,yi+1,s);
+  return a+(b-a)*fx+(c-a)*fy+(a-b-c+d)*fx*fy}
+function heightmap(W,D,H,scale,oct,seed){
+  const m=[];let lo=1e9,hi=-1e9;
+  for(let j=0;j<D;j++){m.push([]);for(let i=0;i<W;i++){
+    let amp=1,f=1,sum=0,norm=0;
+    for(let o=0;o<oct;o++){sum+=amp*vnoise(i/scale*f,j/scale*f,seed+o*101);norm+=amp;amp*=.5;f*=2}
+    const n=sum/norm;m[j].push(n);lo=Math.min(lo,n);hi=Math.max(hi,n)}}
+  return m.map(r=>r.map(n=>Math.round((n-lo)/((hi-lo)||1)*H)))
+}
+const $=id=>document.getElementById(id);
+function build(){
+  const W=+$("w").value,D=+$("d").value,H=+$("hm").value,sc=+$("sc").value,oc=+$("oc").value,seed=+$("seed").value||0;
+  const ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0),solid=$("fill").value==="solid";
+  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;
+  const m=heightmap(W,D,H,sc,oc,seed);
+  const parts=[];let blocks=0;
+  for(let j=0;j<D;j++)for(let i=0;i<W;i++){
+    const h=m[j][i];let from=0;
+    if(!solid){const nb=[[i-1,j],[i+1,j],[i,j-1],[i,j+1]].map(([a,b])=>(m[b]&&m[b][a]!==undefined)?m[b][a]:h);from=Math.max(0,Math.min(h,...nb))}
+    for(let k=from;k<=h;k++){parts.push(enc(ox+i,oy+j,k));blocks++}
+  }
+  const cv=$("cv");cv.width=W;cv.height=D;const g=cv.getContext("2d"),im=g.createImageData(W,D);
+  const ramp=[[47,111,79],[120,160,80],[196,178,110],[150,110,80],[245,245,245]];
+  for(let j=0;j<D;j++)for(let i=0;i<W;i++){
+    const t=H?m[j][i]/H:0,p=t*4,a=Math.min(3,Math.floor(p)),f=p-a,o=(j*W+i)*4;
+    for(let c=0;c<3;c++)im.data[o+c]=ramp[a][c]+(ramp[a+1][c]-ramp[a][c])*f;im.data[o+3]=255}
+  g.putImageData(im,0,0);
+  const str=parts.join(";");$("out").value=str;
+  const over=ox+W>256||oy+D>256;
+  $("stats").innerHTML=blocks.toLocaleString()+" blocks, "+str.length.toLocaleString()+" characters"+
+    (over?'<br><span class="warn">Start position plus size goes past 255. Lower the start x or y.</span>':"")+
+    (blocks>5000?'<br><span class="warn">That is a lot of blocks. The game may be slow to import it; try a smaller size or surface only.</span>':"");
+}
+function selftest(){
+  const cases=[[118,135,0,"G2BwhA"],[118,135,1,"G2FwhA"],[118,135,2,"G2JwhA"],[119,135,0,"G3BwhA"],[120,135,0,"G4BwhA"]];
+  $("test").innerHTML="Encoder check against your samples: "+cases.map(c=>enc(c[0],c[1],c[2])===c[3].slice(1)+"A"||enc(c[0],c[1],c[2])===c[3]?'<span class="ok">'+c[3]+' ✓</span>':'<span class="bad">'+c[3]+' ✗</span>').join("  ")
+}
+["w","d","hm","sc","oc","seed","fill","ox","oy"].forEach(id=>$(id).addEventListener("input",build));
+$("gen").onclick=build;
+$("rnd").onclick=()=>{$("seed").value=Math.floor(Math.random()*1e6);build()};
+$("copy").onclick=async()=>{try{await navigator.clipboard.writeText($("out").value);$("copy").textContent="Copied"}catch(e){$("out").select();document.execCommand("copy");$("copy").textContent="Copied"}setTimeout(()=>$("copy").textContent="Copy save string",1500)};
+selftest();build();
+</script>
+</body>
+</html>
