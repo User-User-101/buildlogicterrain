@@ -41,6 +41,7 @@ textarea{width:100%;height:110px;margin-top:10px;font:12px ui-monospace,monospac
 <label for="d">Depth (y) <b id="dv"></b></label><input id="d" type="range" min="4" max="256" value="64">
 <label for="hm">Max height <b id="hv"></b></label><input id="hm" type="range" min="1" max="15" value="10">
 <label for="wl">Water level <b id="wlv"></b></label><input id="wl" type="range" min="0" max="15" value="2">
+<label for="zo">Raise terrain <b id="zov"></b></label><input id="zo" type="range" min="0" max="5" value="0">
 <label for="cm">Colors</label>
 <select id="cm"><option value="biome">Biomes</option><option value="height">Height gradient only</option></select>
 <label for="bs">Biome size <b id="bsv"></b></label><input id="bs" type="range" min="10" max="120" value="50">
@@ -102,7 +103,7 @@ function build(){
   const W=+$("w").value,D=+$("d").value,H=+$("hm").value,sc=+$("sc").value,oc=+$("oc").value,seed=+$("seed").value||0;
   const water=+$("wl").value,mode=$("cm").value,bs=+$("bs").value,treeK=+$("tr").value/100;
   const ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0),solid=$("fill").value==="solid";
-  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;$("wlv").textContent=water;$("bsv").textContent=bs;$("trv").textContent=$("tr").value+"%";
+  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;$("wlv").textContent=water;$("zov").textContent=$("zo").value;$("bsv").textContent=bs;$("trv").textContent=$("tr").value+"%";
   let m=field(W,D,sc,oc,seed).map(r=>r.map(n=>Math.round(n*H)));
   const wet=m.map(r=>r.map(h=>h<water));
   m=m.map(r=>r.map(h=>Math.max(h,water)));
@@ -116,9 +117,11 @@ function build(){
     const a=ct(Tm[j][i]),b=ct(Mo[j][i]);
     if(a<.3)return"tundra";if(a>.7)return b<.5?"desert":"savanna";
     return b>.6?"forest":"grass"}));
+  const base=water-(+$("zo").value);
+  m=m.map(r=>r.map(h=>h-base)); // water surface sits on the ground (z=0)
   function color(i,j,k,top){
     const b=bio[j][i];if(b==="water")return BIO.water[0];
-    let c=(mode==="height")?ramp(H?k/H:0):BIO[b][top?0:1].slice();
+    let c=(mode==="height")?ramp(H?(k+base)/H:0):BIO[b][top?0:1].slice();
     let f=.94+.12*hash(i,j,k+seed);
     if(top){const h=m[j][i];f*=Math.min(1.3,Math.max(.7,1+.08*((at(i-1,j,h)-at(i+1,j,h))+(at(i,j-1,h)-at(i,j+1,h)))))}
     return c.map(v=>Math.max(0,Math.min(255,Math.round(v*f))));
@@ -133,7 +136,7 @@ function build(){
   for(let j=0;j<D;j++)for(let i=0;i<W;i++){
     const h=m[j][i];let from=0;
     // only blocks with an exposed side: start one above the lowest neighbour
-    if(!solid)from=Math.max(0,Math.min(h,Math.min(at(i-1,j,h),at(i+1,j,h),at(i,j-1,h),at(i,j+1,h))+1));
+    if(!solid)from=Math.max(0,Math.min(h,Math.min(at(i-1,j,-1),at(i+1,j,-1),at(i,j-1,-1),at(i,j+1,-1))+1));
     for(let k=from;k<=h;k++)put(i,j,k,color(i,j,k,k===h));
   }
   let trees=0;
@@ -158,13 +161,13 @@ function build(){
   $("stats").innerHTML=cells.size.toLocaleString()+" blocks, "+trees.toLocaleString()+" trees, "+str.length.toLocaleString()+" characters"+
     (over?'<br><span class="warn">Start position plus size goes past 255. Lower the start x or y.</span>':"")+
     (cells.size>50000?'<br><span class="warn">Very large. If the game will not import it, shrink the area or use surface only.</span>':"")+
-    (H+5>CAP?'<br><span class="warn">Trees only grow where there is room under the height limit of 15, so tall hills have none.</span>':"");
+    (H-base+5>CAP?'<br><span class="warn">Trees only grow where there is room under the height limit of 15, so tall hills have none.</span>':"");
 }
 function selftest(){
   const cases=[[118,135,0,null,"G2BwhA"],[118,135,2,null,"G2JwhA"],[120,135,0,null,"G4BwhA"],[115,97,0,null,"GzBQYA"],[115,97,0,[255,0,0],"GzBQYA$DAA"],[114,97,0,[17,45,255],"GyBQYAR0y$"]];
   $("test").innerHTML="Encoder check against your samples: "+cases.map(c=>enc(c[0],c[1],c[2],c[3])===c[4]?'<span class="ok">'+c[4]+' ✓</span>':'<span class="bad">'+c[4]+' ✗</span>').join("  ")
 }
-["w","d","hm","sc","oc","seed","fill","ox","oy","wl","cm","bs","tr"].forEach(id=>$(id).addEventListener("input",build));
+["w","d","hm","sc","oc","seed","fill","ox","oy","wl","cm","bs","tr","zo"].forEach(id=>$(id).addEventListener("input",build));
 $("gen").onclick=build;
 $("whole").onclick=()=>{$("w").value=256;$("d").value=256;$("ox").value=0;$("oy").value=0;build()};
 $("rnd").onclick=()=>{$("seed").value=Math.floor(Math.random()*1e6);build()};
