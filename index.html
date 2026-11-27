@@ -39,10 +39,12 @@ textarea{width:100%;height:110px;margin-top:10px;font:12px ui-monospace,monospac
 <section class="card" aria-label="Settings">
 <label for="w">Width (x) <b id="wv"></b></label><input id="w" type="range" min="4" max="256" value="64">
 <label for="d">Depth (y) <b id="dv"></b></label><input id="d" type="range" min="4" max="256" value="64">
-<label for="hm">Max height <b id="hv"></b></label><input id="hm" type="range" min="1" max="15" value="8">
-<label for="wl">Water level <b id="wlv"></b></label><input id="wl" type="range" min="0" max="15" value="3">
+<label for="hm">Max height <b id="hv"></b></label><input id="hm" type="range" min="1" max="15" value="10">
+<label for="wl">Water level <b id="wlv"></b></label><input id="wl" type="range" min="0" max="15" value="2">
 <label for="cm">Colors</label>
-<select id="cm"><option value="shade">Height colors + shading</option><option value="flat">Height colors, flat</option></select>
+<select id="cm"><option value="biome">Biomes</option><option value="height">Height gradient only</option></select>
+<label for="bs">Biome size <b id="bsv"></b></label><input id="bs" type="range" min="10" max="120" value="50">
+<label for="tr">Trees <b id="trv"></b></label><input id="tr" type="range" min="0" max="200" value="100">
 <label for="sc">Hill size <b id="sv"></b></label><input id="sc" type="range" min="3" max="40" value="14">
 <label for="oc">Roughness <b id="ov"></b></label><input id="oc" type="range" min="1" max="5" value="3">
 <label for="seed">Seed</label>
@@ -79,52 +81,90 @@ const sm=t=>t*t*(3-2*t);
 function vnoise(x,y,s){const xi=Math.floor(x),yi=Math.floor(y),fx=sm(x-xi),fy=sm(y-yi);
   const a=hash(xi,yi,s),b=hash(xi+1,yi,s),c=hash(xi,yi+1,s),d=hash(xi+1,yi+1,s);
   return a+(b-a)*fx+(c-a)*fy+(a-b-c+d)*fx*fy}
-function heightmap(W,D,H,scale,oct,seed){
+function field(W,D,scale,oct,seed){
   const m=[];let lo=1e9,hi=-1e9;
   for(let j=0;j<D;j++){m.push([]);for(let i=0;i<W;i++){
     let amp=1,f=1,sum=0,norm=0;
     for(let o=0;o<oct;o++){sum+=amp*vnoise(i/scale*f,j/scale*f,seed+o*101);norm+=amp;amp*=.5;f*=2}
     const n=sum/norm;m[j].push(n);lo=Math.min(lo,n);hi=Math.max(hi,n)}}
-  return m.map(r=>r.map(n=>Math.round((n-lo)/((hi-lo)||1)*H)))
+  return m.map(r=>r.map(n=>(n-lo)/((hi-lo)||1)))
 }
-const RAMP=[[58,128,70],[120,165,82],[198,180,112],[145,105,72],[245,245,245]],WATER=[38,92,160];
+const RAMP=[[58,128,70],[120,165,82],[198,180,112],[145,105,72],[245,245,245]];
 function ramp(t){const p=Math.min(1,Math.max(0,t))*4,a=Math.min(3,Math.floor(p)),f=p-a;return RAMP[a].map((c,n)=>c+(RAMP[a+1][n]-c)*f)}
+// [top color, side color]
+const BIO={water:[[38,92,160],[38,92,160]],beach:[[226,208,150],[200,182,130]],desert:[[224,198,125],[200,170,100]],
+  savanna:[[172,170,80],[130,100,65]],grass:[[95,168,72],[112,82,55]],forest:[[48,120,58],[105,76,50]],
+  tundra:[[186,204,198],[120,110,100]],rock:[[128,128,134],[100,100,106]],snow:[[244,247,250],[150,150,158]]};
+const TRUNK=[100,70,45],OAK=[52,138,60],SPRUCE=[30,92,70],CACTUS=[58,138,72],CAP=15;
+const TREE_P={forest:.07,grass:.012,tundra:.015,savanna:.01,desert:.006};
 const $=id=>document.getElementById(id);
 function build(){
   const W=+$("w").value,D=+$("d").value,H=+$("hm").value,sc=+$("sc").value,oc=+$("oc").value,seed=+$("seed").value||0;
-  const water=+$("wl").value,shade=$("cm").value==="shade";
+  const water=+$("wl").value,mode=$("cm").value,bs=+$("bs").value,treeK=+$("tr").value/100;
   const ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0),solid=$("fill").value==="solid";
-  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;$("wlv").textContent=water;
-  let m=heightmap(W,D,H,sc,oc,seed);
+  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;$("wlv").textContent=water;$("bsv").textContent=bs;$("trv").textContent=$("tr").value+"%";
+  let m=field(W,D,sc,oc,seed).map(r=>r.map(n=>Math.round(n*H)));
   const wet=m.map(r=>r.map(h=>h<water));
   m=m.map(r=>r.map(h=>Math.max(h,water)));
   const at=(i,j,d)=>(m[j]&&m[j][i]!==undefined)?m[j][i]:d;
+  const Tm=field(W,D,bs,2,seed+11),Mo=field(W,D,bs*.8,2,seed+23),ct=v=>Math.min(1,Math.max(0,(v-.5)*1.8+.5));
+  const bio=m.map((r,j)=>r.map((h,i)=>{
+    if(wet[j][i])return"water";
+    const t=H>water?(h-water)/(H-water):0;
+    if(water>0&&h<=water)return"beach";
+    if(t>.92)return"snow";if(t>.72)return"rock";
+    const a=ct(Tm[j][i]),b=ct(Mo[j][i]);
+    if(a<.3)return"tundra";if(a>.7)return b<.5?"desert":"savanna";
+    return b>.6?"forest":"grass"}));
   function color(i,j,k,top){
-    if(wet[j][i])return WATER;
-    let c=ramp(H?k/H:0);
-    if(shade&&top){const h=m[j][i],f=Math.min(1.35,Math.max(.65,1+.1*((at(i-1,j,h)-at(i+1,j,h))+(at(i,j-1,h)-at(i,j+1,h)))));c=c.map(v=>v*f)}
-    return c.map(v=>Math.max(0,Math.min(255,Math.round(v))));
+    const b=bio[j][i];if(b==="water")return BIO.water[0];
+    let c=(mode==="height")?ramp(H?k/H:0):BIO[b][top?0:1].slice();
+    let f=.94+.12*hash(i,j,k+seed);
+    if(top){const h=m[j][i];f*=Math.min(1.3,Math.max(.7,1+.08*((at(i-1,j,h)-at(i+1,j,h))+(at(i,j-1,h)-at(i,j+1,h)))))}
+    return c.map(v=>Math.max(0,Math.min(255,Math.round(v*f))));
   }
-  const parts=[];let blocks=0;
+  const cells=new Map(),pv=new Array(W*D),pz=new Int16Array(W*D).fill(-1);
+  function put(i,j,z,c,keep){
+    const x=ox+i,y=oy+j;if(x<0||y<0||x>255||y>255||z<0||z>CAP)return;
+    const key=(x*256+y)*64+z;if(keep&&cells.has(key))return;
+    cells.set(key,[x,y,z,c]);
+    if(i>=0&&i<W&&j>=0&&j<D&&z>=pz[j*W+i]){pz[j*W+i]=z;pv[j*W+i]=c}
+  }
   for(let j=0;j<D;j++)for(let i=0;i<W;i++){
     const h=m[j][i];let from=0;
-    if(!solid){from=Math.max(0,Math.min(h,at(i-1,j,h),at(i+1,j,h),at(i,j-1,h),at(i,j+1,h)))}
-    for(let k=from;k<=h;k++){parts.push(enc(ox+i,oy+j,k,color(i,j,k,k===h)));blocks++}
+    // only blocks with an exposed side: start one above the lowest neighbour
+    if(!solid)from=Math.max(0,Math.min(h,Math.min(at(i-1,j,h),at(i+1,j,h),at(i,j-1,h),at(i,j+1,h))+1));
+    for(let k=from;k<=h;k++)put(i,j,k,color(i,j,k,k===h));
+  }
+  let trees=0;
+  const hs=(i,j,n)=>hash(i,j,seed+n);
+  for(let j=1;j<D-1;j++)for(let i=1;i<W-1;i++){
+    const b=bio[j][i],pr=TREE_P[b];if(!pr||hs(i,j,7)>=pr*treeK)continue;
+    const h=m[j][i],tall=hs(i,j,9)>.5?1:0;
+    if(b==="desert"){const n=2+tall;if(h+n>CAP)continue;for(let z=1;z<=n;z++)put(i,j,h+z,CACTUS);trees++;continue}
+    const tr=4+tall;if(h+tr+1>CAP)continue;
+    const leaf=b==="tundra"?SPRUCE:OAK;
+    for(let z=1;z<=tr-2;z++)put(i,j,h+z,TRUNK); // trunk stops where the leaves hide it
+    for(const dz of [tr-1,tr])for(let dx=-1;dx<=1;dx++)for(let dy=-1;dy<=1;dy++)
+      if((dx||dy)&&h+dz>at(i+dx,j+dy,0))put(i+dx,j+dy,h+dz,leaf,true);
+    for(const[dx,dy]of[[0,0],[1,0],[-1,0],[0,1],[0,-1]])put(i+dx,j+dy,h+tr+1,leaf,true);
+    trees++;
   }
   const cv=$("cv");cv.width=W;cv.height=D;const g=cv.getContext("2d"),im=g.createImageData(W,D);
-  for(let j=0;j<D;j++)for(let i=0;i<W;i++){const c=color(i,j,m[j][i],true),o=(j*W+i)*4;im.data[o]=c[0];im.data[o+1]=c[1];im.data[o+2]=c[2];im.data[o+3]=255}
+  for(let n=0;n<W*D;n++){const c=pv[n]||[40,40,40],o=n*4;im.data[o]=c[0];im.data[o+1]=c[1];im.data[o+2]=c[2];im.data[o+3]=255}
   g.putImageData(im,0,0);
-  const str=parts.join(";");$("out").value=str;
+  const str=[...cells.values()].map(v=>enc(v[0],v[1],v[2],v[3])).join(";");$("out").value=str;
   const over=ox+W>256||oy+D>256;
-  $("stats").innerHTML=blocks.toLocaleString()+" blocks, "+str.length.toLocaleString()+" characters"+
+  $("stats").innerHTML=cells.size.toLocaleString()+" blocks, "+trees.toLocaleString()+" trees, "+str.length.toLocaleString()+" characters"+
     (over?'<br><span class="warn">Start position plus size goes past 255. Lower the start x or y.</span>':"")+
-    (blocks>50000?'<br><span class="warn">Very large. If the game will not import it, shrink the area or use surface only.</span>':"");
+    (cells.size>50000?'<br><span class="warn">Very large. If the game will not import it, shrink the area or use surface only.</span>':"")+
+    (H+5>CAP?'<br><span class="warn">Trees only grow where there is room under the height limit of 15, so tall hills have none.</span>':"");
 }
 function selftest(){
   const cases=[[118,135,0,null,"G2BwhA"],[118,135,2,null,"G2JwhA"],[120,135,0,null,"G4BwhA"],[115,97,0,null,"GzBQYA"],[115,97,0,[255,0,0],"GzBQYA$DAA"],[114,97,0,[17,45,255],"GyBQYAR0y$"]];
   $("test").innerHTML="Encoder check against your samples: "+cases.map(c=>enc(c[0],c[1],c[2],c[3])===c[4]?'<span class="ok">'+c[4]+' ✓</span>':'<span class="bad">'+c[4]+' ✗</span>').join("  ")
 }
-["w","d","hm","sc","oc","seed","fill","ox","oy","wl","cm"].forEach(id=>$(id).addEventListener("input",build));
+["w","d","hm","sc","oc","seed","fill","ox","oy","wl","cm","bs","tr"].forEach(id=>$(id).addEventListener("input",build));
 $("gen").onclick=build;
 $("whole").onclick=()=>{$("w").value=256;$("d").value=256;$("ox").value=0;$("oy").value=0;build()};
 $("rnd").onclick=()=>{$("seed").value=Math.floor(Math.random()*1e6);build()};
