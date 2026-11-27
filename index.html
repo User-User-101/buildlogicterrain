@@ -37,9 +37,12 @@ textarea{width:100%;height:110px;margin-top:10px;font:12px ui-monospace,monospac
 <p class="sub">Makes hills out of stacked blocks and gives you a save string to paste into the game. Everything runs in your browser.</p>
 <div class="grid">
 <section class="card" aria-label="Settings">
-<label for="w">Width (x) <b id="wv"></b></label><input id="w" type="range" min="4" max="64" value="32">
-<label for="d">Depth (y) <b id="dv"></b></label><input id="d" type="range" min="4" max="64" value="32">
+<label for="w">Width (x) <b id="wv"></b></label><input id="w" type="range" min="4" max="256" value="64">
+<label for="d">Depth (y) <b id="dv"></b></label><input id="d" type="range" min="4" max="256" value="64">
 <label for="hm">Max height <b id="hv"></b></label><input id="hm" type="range" min="1" max="15" value="8">
+<label for="wl">Water level <b id="wlv"></b></label><input id="wl" type="range" min="0" max="15" value="3">
+<label for="cm">Colors</label>
+<select id="cm"><option value="shade">Height colors + shading</option><option value="flat">Height colors, flat</option></select>
 <label for="sc">Hill size <b id="sv"></b></label><input id="sc" type="range" min="3" max="40" value="14">
 <label for="oc">Roughness <b id="ov"></b></label><input id="oc" type="range" min="1" max="5" value="3">
 <label for="seed">Seed</label>
@@ -47,25 +50,28 @@ textarea{width:100%;height:110px;margin-top:10px;font:12px ui-monospace,monospac
 <label for="fill">Fill</label>
 <select id="fill"><option value="skin">Surface only (fewer blocks)</option><option value="solid">Solid down to ground</option></select>
 <label>Start position (x, y)</label>
-<div class="row"><input id="ox" type="number" value="100" min="0" max="255" aria-label="Start x"><input id="oy" type="number" value="100" min="0" max="255" aria-label="Start y"></div>
+<div class="row"><button class="alt" id="whole" type="button">Whole map (256 x 256)</button></div>
+<div class="row" style="margin-top:8px"><input id="ox" type="number" value="100" min="0" max="255" aria-label="Start x"><input id="oy" type="number" value="100" min="0" max="255" aria-label="Start y"></div>
 </section>
 <section class="card" aria-label="Result">
 <canvas id="cv" width="64" height="64" aria-label="Top-down height preview"></canvas>
 <div class="stats" id="stats"></div>
 <textarea id="out" readonly aria-label="Save string"></textarea>
-<div class="row" style="margin-top:10px"><button id="copy" type="button">Copy save string</button><button class="alt" id="gen" type="button">Regenerate</button></div>
+<div class="row" style="margin-top:10px"><button id="copy" type="button">Copy save string</button><button class="alt" id="gen" type="button">Regenerate</button><button class="alt" id="dl" type="button">Download .txt</button></div>
 <div id="test"></div>
 </section>
 </div>
 </main>
 <script>
-// Save string format: reverse-engineered from samples, block id 43 only.
-// Entry = 'G' + 5 base64-style chars (6 bits each, lowest bits first).
-// Fields: x = bits 6-13, height = bits 14-17, y = bits 22-29. Raw values 0-255 (x, y), 0-15 (height).
+// Save string format, reverse-engineered from samples (block id 43 only).
+// Entry = 'G' + 5 chars + optional 4 color chars. 6 bits per char, lowest bits first.
+// x = bits 6-13, height = bits 14-17, y = bits 22-29 (x,y 0-255, height 0-15).
+// Color = 3 bytes (R,G,B) packed little-endian into the 4 chars after the first 6.
 const AL="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$";
-function enc(x,y,h){
-  let v=6+x*64+h*16384+y*4194304, s="";
-  for(let i=0;i<6;i++){s+=AL[v%64];v=Math.floor(v/64)}
+function chars(v,n){let s="";for(let i=0;i<n;i++){s+=AL[v%64];v=Math.floor(v/64)}return s}
+function enc(x,y,h,rgb){
+  let s=chars(6+x*64+h*16384+y*4194304,6);
+  if(rgb)s+=chars(rgb[0]+rgb[1]*256+rgb[2]*65536,4);
   return s;
 }
 function hash(a,b,s){let t=(a*374761393+b*668265263+s*1274126177)|0;t=Math.imul(t^(t>>>13),1274126177);return((t^(t>>>16))>>>0)/4294967296}
@@ -81,37 +87,48 @@ function heightmap(W,D,H,scale,oct,seed){
     const n=sum/norm;m[j].push(n);lo=Math.min(lo,n);hi=Math.max(hi,n)}}
   return m.map(r=>r.map(n=>Math.round((n-lo)/((hi-lo)||1)*H)))
 }
+const RAMP=[[58,128,70],[120,165,82],[198,180,112],[145,105,72],[245,245,245]],WATER=[38,92,160];
+function ramp(t){const p=Math.min(1,Math.max(0,t))*4,a=Math.min(3,Math.floor(p)),f=p-a;return RAMP[a].map((c,n)=>c+(RAMP[a+1][n]-c)*f)}
 const $=id=>document.getElementById(id);
 function build(){
   const W=+$("w").value,D=+$("d").value,H=+$("hm").value,sc=+$("sc").value,oc=+$("oc").value,seed=+$("seed").value||0;
+  const water=+$("wl").value,shade=$("cm").value==="shade";
   const ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0),solid=$("fill").value==="solid";
-  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;
-  const m=heightmap(W,D,H,sc,oc,seed);
+  $("wv").textContent=W;$("dv").textContent=D;$("hv").textContent=H;$("sv").textContent=sc;$("ov").textContent=oc;$("wlv").textContent=water;
+  let m=heightmap(W,D,H,sc,oc,seed);
+  const wet=m.map(r=>r.map(h=>h<water));
+  m=m.map(r=>r.map(h=>Math.max(h,water)));
+  const at=(i,j,d)=>(m[j]&&m[j][i]!==undefined)?m[j][i]:d;
+  function color(i,j,k,top){
+    if(wet[j][i])return WATER;
+    let c=ramp(H?k/H:0);
+    if(shade&&top){const h=m[j][i],f=Math.min(1.35,Math.max(.65,1+.1*((at(i-1,j,h)-at(i+1,j,h))+(at(i,j-1,h)-at(i,j+1,h)))));c=c.map(v=>v*f)}
+    return c.map(v=>Math.max(0,Math.min(255,Math.round(v))));
+  }
   const parts=[];let blocks=0;
   for(let j=0;j<D;j++)for(let i=0;i<W;i++){
     const h=m[j][i];let from=0;
-    if(!solid){const nb=[[i-1,j],[i+1,j],[i,j-1],[i,j+1]].map(([a,b])=>(m[b]&&m[b][a]!==undefined)?m[b][a]:h);from=Math.max(0,Math.min(h,...nb))}
-    for(let k=from;k<=h;k++){parts.push(enc(ox+i,oy+j,k));blocks++}
+    if(!solid){from=Math.max(0,Math.min(h,at(i-1,j,h),at(i+1,j,h),at(i,j-1,h),at(i,j+1,h)))}
+    for(let k=from;k<=h;k++){parts.push(enc(ox+i,oy+j,k,color(i,j,k,k===h)));blocks++}
   }
   const cv=$("cv");cv.width=W;cv.height=D;const g=cv.getContext("2d"),im=g.createImageData(W,D);
-  const ramp=[[47,111,79],[120,160,80],[196,178,110],[150,110,80],[245,245,245]];
-  for(let j=0;j<D;j++)for(let i=0;i<W;i++){
-    const t=H?m[j][i]/H:0,p=t*4,a=Math.min(3,Math.floor(p)),f=p-a,o=(j*W+i)*4;
-    for(let c=0;c<3;c++)im.data[o+c]=ramp[a][c]+(ramp[a+1][c]-ramp[a][c])*f;im.data[o+3]=255}
+  for(let j=0;j<D;j++)for(let i=0;i<W;i++){const c=color(i,j,m[j][i],true),o=(j*W+i)*4;im.data[o]=c[0];im.data[o+1]=c[1];im.data[o+2]=c[2];im.data[o+3]=255}
   g.putImageData(im,0,0);
   const str=parts.join(";");$("out").value=str;
   const over=ox+W>256||oy+D>256;
   $("stats").innerHTML=blocks.toLocaleString()+" blocks, "+str.length.toLocaleString()+" characters"+
     (over?'<br><span class="warn">Start position plus size goes past 255. Lower the start x or y.</span>':"")+
-    (blocks>5000?'<br><span class="warn">That is a lot of blocks. The game may be slow to import it; try a smaller size or surface only.</span>':"");
+    (blocks>50000?'<br><span class="warn">Very large. If the game will not import it, shrink the area or use surface only.</span>':"");
 }
 function selftest(){
-  const cases=[[118,135,0,"G2BwhA"],[118,135,1,"G2FwhA"],[118,135,2,"G2JwhA"],[119,135,0,"G3BwhA"],[120,135,0,"G4BwhA"]];
-  $("test").innerHTML="Encoder check against your samples: "+cases.map(c=>enc(c[0],c[1],c[2])===c[3].slice(1)+"A"||enc(c[0],c[1],c[2])===c[3]?'<span class="ok">'+c[3]+' ✓</span>':'<span class="bad">'+c[3]+' ✗</span>').join("  ")
+  const cases=[[118,135,0,null,"G2BwhA"],[118,135,2,null,"G2JwhA"],[120,135,0,null,"G4BwhA"],[115,97,0,null,"GzBQYA"],[115,97,0,[255,0,0],"GzBQYA$DAA"],[114,97,0,[17,45,255],"GyBQYAR0y$"]];
+  $("test").innerHTML="Encoder check against your samples: "+cases.map(c=>enc(c[0],c[1],c[2],c[3])===c[4]?'<span class="ok">'+c[4]+' ✓</span>':'<span class="bad">'+c[4]+' ✗</span>').join("  ")
 }
-["w","d","hm","sc","oc","seed","fill","ox","oy"].forEach(id=>$(id).addEventListener("input",build));
+["w","d","hm","sc","oc","seed","fill","ox","oy","wl","cm"].forEach(id=>$(id).addEventListener("input",build));
 $("gen").onclick=build;
+$("whole").onclick=()=>{$("w").value=256;$("d").value=256;$("ox").value=0;$("oy").value=0;build()};
 $("rnd").onclick=()=>{$("seed").value=Math.floor(Math.random()*1e6);build()};
+$("dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([$("out").value],{type:"text/plain"}));a.download="terrain-save.txt";a.click()};
 $("copy").onclick=async()=>{try{await navigator.clipboard.writeText($("out").value);$("copy").textContent="Copied"}catch(e){$("out").select();document.execCommand("copy");$("copy").textContent="Copied"}setTimeout(()=>$("copy").textContent="Copy save string",1500)};
 selftest();build();
 </script>
