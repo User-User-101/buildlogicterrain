@@ -55,6 +55,7 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <div class="row"><div><label for="ox">Place at world X</label><input id="ox" type="number" min="0" max="255" value="100"></div><div><label for="oy">Place at world Z</label><input id="oy" type="number" min="0" max="255" value="100"></div></div>
 <p class="note">Build Logic coordinates: X and Z are the ground plane; Y is height. The generator converts its design height into world Y automatically.</p>
 <div class="chk"><input id="hollow" type="checkbox" checked><label for="hollow" style="margin:0">Hollow (skip hidden inner blocks)</label></div>
+<div class="chk"><input id="flipPaneFacing" type="checkbox"><label for="flipPaneFacing" style="margin:0">Reverse automatic pane facing (fallback if windows still look sideways)</label></div>
 <div class="row" style="margin-top:14px"><button id="go" type="button">Generate</button><button class="alt" id="reset" type="button">Start over</button></div>
 <p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to the AI service and is not stored on the server. Get a free key at console.groq.com or openrouter.ai.</p>
 <p class="note" id="ver"></p>
@@ -174,114 +175,267 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
       for(let i=-r;i<=r;i++)for(let j=-r;j<=r;j++)if(i*i+j*j<=r*r+r*.5)for(let k=0;k<Math.min(h,64);k++)put(cx+i,cy+j,z+k,col,air)}
   }
 
-  // Signs are wall decorations, not structural wall blocks. Do not let the
-  // model invent a "Home" sign unless the user actually requested signage.
+  const isOrdinary=(x,y,z)=>{
+    if(x<0||y<0||z<0||x>=W||y>=D||z>=H)return false;
+    const c=v.get(key(x,y,z));return !!c&&c[4]==="Block";
+  };
+  const putOrdinary=(x,y,z,col)=>{
+    if(x<0||y<0||z<0||x>=W||y>=D||z>=H)return false;
+    const k=key(x,y,z),old=v.get(k);
+    if(!old||old[4]!=="Block")v.set(k,[x,y,z,(col||[145,145,145]).slice(),"Block",null,"",(col||[145,145,145]).slice()]);
+    return true;
+  };
+  const sampleWallColor=()=>{
+    for(const c of v.values())if(c[4]==="Block"&&c[2]>0)return c[3].slice();
+    for(const c of v.values())if(c[4]==="Block")return c[3].slice();
+    return[145,145,145];
+  };
+  const wantsHouse=/\b(house|home|cottage|cabin|bungalow)\b/i.test(requestText);
   const wantsSign=/\b(sign|signs|signage|label|labels|lettering|write on|text on|welcome sign)\b/i.test(requestText);
   const wantsFurniture=/\b(chair|chairs|seating|furniture|furnished|sofa|couch|stool)\b/i.test(requestText);
   const wantsTorch=/\b(torch|torches|lighting|lights|lit|lamp|lamps)\b/i.test(requestText);
+  let houseBounds=null,houseWallTop=0,houseFrontY=null,houseBackY=null,houseLeftX=null,houseRightX=null;
+  let houseAdded=0,houseWindowsAdded=0,doorRepairs=0,paneRotationsFixed=0,panesSkipped=0;
+
+  // For a normal window/door, the two wall cells immediately to either side
+  // identify the direction in which the wall runs. We inspect only those
+  // supporting cells at the opening's own height(s), rather than distant
+  // nearby walls that can incorrectly win at corners.
+  function sideSupport(x,y,z,axis,height=2){
+    let a=0,b=0;
+    for(let h=0;h<height;h++){
+      if(axis==="x"){
+        if(isOrdinary(x-1,y,z+h))a++;
+        if(isOrdinary(x+1,y,z+h))b++;
+      }else{
+        if(isOrdinary(x,y-1,z+h))a++;
+        if(isOrdinary(x,y+1,z+h))b++;
+      }
+    }
+    return{a,b,score:(a>0?2:0)+(b>0?2:0)+Math.min(a,b)};
+  }
+  function inferWallAxis(x,y,z,hint="",height=2){
+    const sx=sideSupport(x,y,z,"x",height),sy=sideSupport(x,y,z,"y",height);
+    const bx=sx.a>0&&sx.b>0,by=sy.a>0&&sy.b>0;
+    if(bx&&!by)return"x";
+    if(by&&!bx)return"y";
+    if(bx&&by){
+      if(Math.abs(sx.score-sy.score)>=2)return sx.score>sy.score?"x":"y";
+      if(hint==="x"||hint==="y")return hint;
+      return null;
+    }
+    // A partial wall can still be identified when both sides are present at
+    // different heights; never infer a direction from a single stray block.
+    if(sx.score>=3&&sx.score>=sy.score+2)return"x";
+    if(sy.score>=3&&sy.score>=sx.score+2)return"y";
+    return null;
+  }
+  // The saved Pane and Door samples have two useful yaw states: A = 0 and
+  // E = 1. In the prior generator those states were assigned to the opposite
+  // wall directions, producing panes that stood sideways in both wall types.
+  function wallRotation(axis,blockType="Pane"){
+    let yaw=axis==="x"?1:0;
+    // Some servers may use the opposite Pane face convention. This optional
+    // switch lets the user reverse pane yaw without changing door alignment.
+    if(blockType==="Pane"&&typeof document!=="undefined"&&document.getElementById("flipPaneFacing")?.checked)yaw=1-yaw;
+    return[0,yaw,0];
+  }
+
+  // House-specific repair: close accidental wall gaps, build a simple peaked
+  // roof, and make sure a requested house has windows on two different sides.
+  // This is deliberately geometric and happens before special blocks are put
+  // back, so the AI cannot leave a giant opening around a one-cell door.
+  if(wantsHouse){
+    const floors=[...v.values()].filter(c=>c[2]===0&&c[4]==="Block");
+    if(floors.length>=16){
+      const xs=floors.map(c=>c[0]),ys=floors.map(c=>c[1]);
+      const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+      if(maxX-minX>=4&&maxY-minY>=4){
+        houseBounds={minX,maxX,minY,maxY};
+        const existingTop=Math.max(1,...[...v.values()].filter(c=>c[4]==="Block").map(c=>c[2]));
+        houseWallTop=Math.max(2,Math.min(4,Math.max(3,existingTop-1),H-2));
+        const wallColor=sampleWallColor();
+        // Detect whether each exterior wall is on the floor edge or inset by
+        // one cell. The line with the most existing wall cells is selected.
+        function bestLine(axis,edge,dir,start,end){
+          let best=edge,bestScore=-1;
+          for(let offset=0;offset<=1;offset++){
+            const line=edge+dir*offset;let score=0;
+            for(let t=start;t<=end;t++)for(let h=1;h<=houseWallTop;h++){
+              if(axis==="x"?isOrdinary(line,t,h):isOrdinary(t,line,h))score++;
+            }
+            if(score>bestScore){bestScore=score;best=line;}
+          }
+          return best;
+        }
+        houseFrontY=bestLine("y",minY,1,minX,maxX);
+        houseBackY=bestLine("y",maxY,-1,minX,maxX);
+        houseLeftX=bestLine("x",minX,1,minY,maxY);
+        houseRightX=bestLine("x",maxX,-1,minY,maxY);
+        // Fill a continuous floor and the four wall planes. Later the actual
+        // Door and Pane blocks replace only their own individual wall cells.
+        for(let x=minX;x<=maxX;x++)for(let y=minY;y<=maxY;y++){
+          if(!isOrdinary(x,y,0)){putOrdinary(x,y,0,wallColor);houseAdded++;}
+        }
+        for(let h=1;h<=houseWallTop;h++){
+          for(let x=minX;x<=maxX;x++){
+            if(!isOrdinary(x,houseFrontY,h)){putOrdinary(x,houseFrontY,h,wallColor);houseAdded++;}
+            if(!isOrdinary(x,houseBackY,h)){putOrdinary(x,houseBackY,h,wallColor);houseAdded++;}
+          }
+          for(let y=minY;y<=maxY;y++){
+            if(!isOrdinary(houseLeftX,y,h)){putOrdinary(houseLeftX,y,h,wallColor);houseAdded++;}
+            if(!isOrdinary(houseRightX,y,h)){putOrdinary(houseRightX,y,h,wallColor);houseAdded++;}
+          }
+        }
+        // A stepped gable roof runs along the depth of the house. Keep it
+        // within the requested height and preserve all existing roof details.
+        const roofBase=houseWallTop+1;
+        const rise=Math.max(0,Math.min(3,Math.floor((maxX-minX)/2),H-1-roofBase));
+        if(rise>0){
+          const roofColor=[105,76,55];
+          for(let x=minX;x<=maxX;x++){
+            const roofZ=roofBase+Math.min(rise,x-minX,maxX-x);
+            for(let y=minY;y<=maxY;y++){
+              if(!isOrdinary(x,y,roofZ)){putOrdinary(x,y,roofZ,roofColor);houseAdded++;}
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // A plain house always gets one entrance on its front wall. If the model
+  // omitted the Door, add one; if it misplaced it, it is snapped to the front
+  // wall. This avoids a door opening in the middle of the room or in the floor.
+  const doorParts=specials.filter(p=>p.type==="Door");
+  if(wantsHouse&&houseBounds&&houseFrontY!==null){
+    const {minX,maxX}=houseBounds;
+    const frontDoorX=Math.floor((minX+maxX)/2),frontDoorZ=1;
+    if(doorParts.length){
+      doorParts[0].x=frontDoorX;doorParts[0].y=houseFrontY;doorParts[0].z=frontDoorZ;
+      doorParts[0].wallAxis="x";doorParts[0].rotation=wallRotation("x","Door");
+      if(doorParts.length>1)for(const extra of doorParts.slice(1))extra.type="Block";
+      doorRepairs++;
+    }else{
+      specials.push({x:frontDoorX,y:houseFrontY,z:frontDoorZ,col:[145,145,145],type:"Door",rotation:wallRotation("x","Door"),value:"",saveColor:null,wallAxis:"x"});
+      doorParts.push(specials[specials.length-1]);doorRepairs++;
+    }
+  }
+
+  // For houses, replace the model's pane placements with two known wall
+  // openings. This prevents the model from placing glass on the wrong face or
+  // at a corner where rotation is ambiguous. Other designs keep their own panes.
+  if(wantsHouse&&houseBounds&&houseFrontY!==null){
+    for(let i=specials.length-1;i>=0;i--){
+      if(specials[i].type==="Pane"||specials[i].type==="Corner Pane")specials.splice(i,1);
+    }
+    const {minX,maxX,minY,maxY}=houseBounds;
+    const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+    const doorX=Math.floor((minX+maxX)/2);
+    const winZ=Math.min(2,Math.max(1,houseWallTop-1));
+    const frontWinX=clamp(doorX-2,minX+1,maxX-1);
+    const sideWinY=clamp(Math.floor((minY+maxY)/2),minY+1,maxY-1);
+    const candidates=[
+      {x:frontWinX,y:houseFrontY,z:winZ,axis:"x"},
+      {x:houseRightX,y:sideWinY,z:winZ,axis:"y"}
+    ];
+    for(const w of candidates){
+      if(w.x<0||w.y<0||w.x>=W||w.y>=D)continue;
+      specials.push({x:w.x,y:w.y,z:w.z,col:[155,195,210],type:"Pane",rotation:wallRotation(w.axis,"Pane"),value:"",saveColor:null,wallAxis:w.axis});
+      houseWindowsAdded++;
+    }
+  }
+
+  // Signs and furniture are decorations, never wall/floor replacements unless
+  // the user specifically asked for them.
   const kept=[];
   for(const item of specials){
     if((item.type==="Sign"||item.type==="Sign 1x2")&&!wantsSign){filteredDecor++;continue}
     if(["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type)&&!wantsFurniture){filteredDecor++;continue}
     if(item.type==="Torch"&&!wantsTorch){filteredDecor++;continue}
+    if(item.type==="Block")continue;
     kept.push(item);
   }
 
-  const isOrdinary=(x,y,z)=>{const c=v.get(key(x,y,z));return !!c&&c[4]==="Block"};
-  const floorSupportAt=(x,y)=>{
-    if(isOrdinary(x,y,0))return true;
-    let n=0;
-    if(isOrdinary(x-1,y,0))n++;
-    if(isOrdinary(x+1,y,0))n++;
-    if(isOrdinary(x,y-1,0))n++;
-    if(isOrdinary(x,y+1,0))n++;
-    return n>=2;
-  };
-  const wallScores=(x,y,z)=>{
-    // Infer the wall direction from real wall cubes around the window opening.
-    // Looking only at the pane's exact height is fragile: the opening itself
-    // has no cubes, and wider windows may leave a gap on both sides. Sample
-    // nearby heights and up to three cells in both directions instead.
-    let sx=0,sy=0;
-    for(let dh=-1;dh<=2;dh++){
-      const zz=z+dh;if(zz<0||zz>=H)continue;
-      const verticalWeight=dh===0?3:(Math.abs(dh)===1?2:1);
-      for(let dist=1;dist<=3;dist++){
-        const weight=verticalWeight/(dist*dist);
-        if(isOrdinary(x-dist,y,zz))sx+=weight;
-        if(isOrdinary(x+dist,y,zz))sx+=weight;
-        if(isOrdinary(x,y-dist,zz))sy+=weight;
-        if(isOrdinary(x,y+dist,zz))sy+=weight;
-      }
-    }
-    return{x:sx,y:sy};
-  };
-
-  // Place special items only after the structural cubes have been generated.
-  // This lets furniture sit on top of a floor, and lets window panes replace
-  // only the intended wall cell instead of being overwritten by later boxes.
   const finalSpecials=[];
   for(const item of kept){
     let {x,y,z}=item;
     const isFurniture=["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type);
     const isPane=item.type==="Pane"||item.type==="Corner Pane";
-    // In a house the floor occupies local height 0. If a special object was
-    // mistakenly put in that floor layer, lift it onto the floor surface.
-    if(z===0&&floorSupportAt(x,y)&&(isFurniture||item.type==="Door"||isPane||item.type==="Sign"||item.type==="Sign 1x2"))z=1;
-    // If furniture still collides with a solid wall/cube at its chosen cell,
-    // move it upward until its cell is clear or the build ceiling is reached.
-    if(isFurniture){while(z<H&&isOrdinary(x,y,z))z++;}
+    if(isFurniture){
+      // Chairs are floor furniture: z=1 is the first cell above the floor.
+      if(z<=0)z=1;
+      while(z<H&&isOrdinary(x,y,z))z++;
+    }
     if(isPane){
-      const sc=wallScores(x,y,z);
-      const strongest=Math.max(sc.x,sc.y),difference=Math.abs(sc.x-sc.y);
-      // Trust the actual surrounding wall when it gives a clear direction.
-      // Only fall back to the model's hint when the geometry is tied or sparse.
-      let axis="";
-      if(strongest>=0.5&&difference>=0.2)axis=sc.x>sc.y?"x":"y";
-      else if(item.wallAxis==="x"||item.wallAxis==="y")axis=item.wallAxis;
-      else if(strongest>=0.5)axis=sc.x>=sc.y?"x":"y";
-      else axis="x"; // default pane plane; AI is instructed to give wallAxis for ambiguous corners
-      // Pane rotations are around Build Logic's vertical world-Y axis. The
-      // default pane lies along local X; a wall running along local depth Y
-      // needs one quarter-turn. Corner Pane uses the same axis rule.
-      item.rotation=axis==="y"?(item.type==="Corner Pane"?[0,2,0]:[0,1,0]):[0,0,0];
+      const axis=inferWallAxis(x,y,z,item.wallAxis||"",3);
+      if(!axis){panesSkipped++;continue;}
+      item.wallAxis=axis;
+      item.rotation=wallRotation(axis,item.type);
+      paneRotationsFixed++;
+      // The special pane replaces one wall cube. Its adjacent wall supports
+      // must remain on both sides, so it cannot float beside a wall or sit in
+      // the middle of a room.
+      const k=key(x,y,z);
+      const existing=v.get(k);
+      if(existing&&existing[4]==="Block"){
+        item.col=existing[3].slice();
+        if(!item.saveColor)item.saveColor=null;
+      }
     }
     finalSpecials.push({...item,x,y,z});
   }
 
-  const reservedDoorCells=new Set(),validDoors=[];
-  const nonDoors=new Map();
+  // Doors are two cells high, but occupy one saved block. Only remove those
+  // two wall cells; retain the floor, side jambs, and the lintel above.
+  const validDoors=[],nonDoors=new Map();
   for(const item of finalSpecials){
-    if(item.type==="Door"){
-      // A door is one saved block with a built-in two-cell vertical model.
-      // When a floor is present, its bottom must start one cell above z=0.
-      if(item.z===0&&floorSupportAt(item.x,item.y))item.z=1;
-      if(item.x<0||item.y<0||item.z<0||item.x>=W||item.y>=D||item.z+1>=H){outside++;continue}
-      validDoors.push(item);
-    }else{
+    if(item.type!=="Door"){
       nonDoors.set(key(item.x,item.y,item.z),item);
+      continue;
     }
+    let {x,y,z}=item;
+    if(z<=0)z=1;
+    let axis=inferWallAxis(x,y,z,item.wallAxis||"",2);
+    if(wantsHouse&&houseBounds&&houseFrontY!==null){
+      x=Math.floor((houseBounds.minX+houseBounds.maxX)/2);y=houseFrontY;z=1;axis="x";
+    }
+    if(!axis)axis=item.wallAxis==="y"?"y":"x";
+    item.wallAxis=axis;item.rotation=wallRotation(axis,"Door");
+    if(x<0||y<0||z<1||x>=W||y>=D||z+1>=H){outside++;continue;}
+    const wallColor=sampleWallColor();
+    // Frame the doorway so an AI-carved oversized opening cannot leave empty
+    // space around the door. Refill only the two adjacent jamb columns and
+    // the header cell; keep the actual 1x2 doorway clear.
+    const sides=axis==="x"?[[-1,0],[1,0]]:[[0,-1],[0,1]];
+    for(const [dx,dy] of sides)for(let h=0;h<2;h++){
+      if(!isOrdinary(x+dx,y+dy,z+h)){putOrdinary(x+dx,y+dy,z+h,wallColor);doorRepairs++;}
+    }
+    if(z+2<H&&!isOrdinary(x,y,z+2)){putOrdinary(x,y,z+2,wallColor);doorRepairs++;}
+    // A house door must rest on the continuous floor, never inside it.
+    if(wantsHouse&&z===1&&!isOrdinary(x,y,0)){putOrdinary(x,y,0,wallColor);doorRepairs++;}
+    validDoors.push({...item,x,y,z});
   }
 
-  // Doors reserve their bottom and top cells after every wall/floor operation.
+  const reservedDoorCells=new Set();
   for(const d of validDoors){
     const base=key(d.x,d.y,d.z),head=key(d.x,d.y,d.z+1);
     if(reservedDoorCells.has(base)||reservedDoorCells.has(head))continue;
     reservedDoorCells.add(base);reservedDoorCells.add(head);
   }
-  for(const k of reservedDoorCells){v.delete(k);nonDoors.delete(k)}
+  for(const k of reservedDoorCells){v.delete(k);nonDoors.delete(k);}
 
-  // Add furniture, panes and other special blocks after cubes so they cannot
-  // disappear underneath a later wall/floor part.
+  // Insert panes/furniture/decor after structural blocks. Door cells are
+  // reserved and cannot be overwritten by another special block.
   for(const [k,item] of nonDoors){
+    if(reservedDoorCells.has(k))continue;
     if(v.size<maxCells||v.has(k))v.set(k,[item.x,item.y,item.z,item.col,item.type,item.rotation,item.value,item.saveColor]);
   }
-  // Doors take priority over anything that accidentally overlaps the opening.
   for(const d of validDoors){
     const k=key(d.x,d.y,d.z);
-    if(reservedDoorCells.has(k)&&(v.size<maxCells||v.has(k)))v.set(k,[d.x,d.y,d.z,d.col,"Door",d.rotation,d.value,d.saveColor]);
+    if(v.size<maxCells||v.has(k))v.set(k,[d.x,d.y,d.z,d.col,"Door",d.rotation,d.value,d.saveColor]);
   }
-  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length,filteredDecor};
+  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length,filteredDecor,houseAdded,houseWindowsAdded,doorRepairs,paneRotationsFixed,panesSkipped};
 }
 function hollowOut(cells){
   const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
@@ -310,12 +464,12 @@ Special block type values: ${Object.keys(BLOCKS).filter(k=>k!=="Block").join(", 
 STRUCTURE RULES: Use ordinary Block cubes for all floors, walls, roofs, frames and foundations. Never use a chair, sign, pane, torch, plate, slab or pole as a substitute for an ordinary structural wall/floor cube. Do not overlap special objects with floors or walls except a Pane intentionally placed in a window opening. Avoid duplicate blocks at the same coordinates.
 FLOOR AND DOOR RULES: For a house, make a continuous floor at local z=0. Walls start at z=1. The Door is a single special block whose built-in model is 2 blocks tall; place its bottom at local z=1 (not z=0), leave the two wall cells at that x,y,z=1 and z=2 open, and continue the wall above z=2. Do not create a second block above or below the Door. The generator also moves a door out of an overlapping floor cell and clears only its 2-cell-tall doorway. Keep floor blocks at z=0 intact.
 FURNITURE RULES: Only add chairs (Chair, Slab Chair, Solid Chair, Stair Chair) when the user explicitly asks for chairs, seating or furnished interiors. Put them inside the building, on top of the floor at z=1, with an empty cell at their position; never put them at z=0 or inside a floor/wall. The generator corrects a chair that collides with the floor, but do not rely on that correction.
-WINDOW RULES: For ordinary house windows, use Pane, not Corner Pane. Put panes only in intentional 1x1 openings in vertical outer walls, normally at z=2 or z=3. They are glass window inserts, not blocks to scatter around or place in floors/roofs. Set wallAxis to "x" when the wall runs along local x and to "y" when it runs along local depth y. For Pane, wallAxis x uses rotation [0,0,0] and wallAxis y uses rotation [0,1,0]. Use Corner Pane only for an actual glass corner. Keep panes vertical and flush with the wall.
+WINDOW RULES: For ordinary house windows, use Pane, not Corner Pane. Put panes only in intentional 1x1 openings in vertical outer walls, normally at z=2 or z=3. They are glass window inserts, not blocks to scatter around or place in floors/roofs. Set wallAxis to "x" when the wall runs along local x and to "y" when it runs along local depth y. For Pane, use the corrected wall-facing mapping: a wall that runs along local x uses rotation [0,1,0], and a wall that runs along local depth y uses rotation [0,0,0]. This mapping is enforced after generation from the actual wall supports, so do not guess. Use Corner Pane only for an actual glass corner. Keep panes vertical and flush with the wall.
 SIGN RULES: Never add a Sign or Sign 1x2 to an ordinary house unless the user specifically asks for a sign or text decoration. Never invent a "Home" sign. A sign is a decoration, not a wall block. Only use its text field when signage was requested.
 OTHER DECORATION: Do not add torches unless the user asks for torches or lighting. Use Plate, Slab, poles and stair blocks only when they serve a clear design purpose; do not substitute them for wall cubes.
 For a special block use {"shape":"block","type":"Chair","x":2,"y":2,"z":1,"rotation":[0,1,0],"color":"#cc5555"}. Rotation is optional. Known useful rotations from supplied saves: Chair [0,1,0] or [0,0,0]; Door [0,1,0] or [0,0,0]; Sign [0,0,0] or [0,1,0]; Sign 1x2 [0,0,0] or [0,1,0]; Slab Chair [0,2,0] or [0,1,0]; Solid Chair [0,1,0] or [0,0,0]; Stair Chair [0,3,0] or [0,2,0]; Stair [0,0,0] or [0,1,0]; Trap Door [0,1,0] or [0,2,0]; Corner Pane [0,0,0] or [0,2,0]; Pane [0,0,0] or [0,1,0]; Plate [0,1,0] or [0,3,1]; Slab [0,1,0] or [0,1,1]; 3 Sides Pole [0,1,0] or [0,0,0]; 4 Sides Pole [0,1,0] or [0,2,0]; 4 Sides Pole 2 [0,2,0]; 5 Sides Pole [0,3,2]; 6 Sides Pole [0,3,2] (do not rotate this pole); Corner Pole [0,2,0] or [0,3,0]; Pole [0,3,0] or [0,3,3]; T Pole [0,3,3] or [0,0,3]. Rotation values are [rx,ry,rz], each 0-3. A rotated block is the same type with a different rotation, not a separate type.
 For signs, optionally add "text":"Hello". Colors are optional hex strings. When omitted on a special block, its native Build Logic color is preserved. Add "air":true to box/line/sphere/cylinder parts to carve out space.
-Design realistic proportions and provide enough space for doors and windows. For a small house, do not return only a plain hollow cube. Make a recognizable home with a distinct front entrance, a roof that is visibly shaped (prefer a peaked/sloped roof using Stair blocks or stepped ordinary blocks rather than one flat solid slab), at least two windows on different exterior walls, and some exterior variation such as trim, a porch, or a chimney when space allows. Keep the inside hollow but do not make the exterior a featureless box. Put the door in the front wall at height z=1, with its two-cell opening clear. Put each Pane exactly in its wall opening and supply the correct wallAxis. Do not use signs, chairs, or torches unless requested. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
+Design realistic proportions and provide enough space for doors and windows. For a small house, do not return only a plain hollow cube. Make a recognizable home with a distinct front entrance, a roof that is visibly shaped (prefer a peaked/sloped roof using Stair blocks or stepped ordinary blocks rather than one flat solid slab), at least two windows on different exterior walls, and some exterior variation such as trim, a porch, or a chimney when space allows. Keep the inside hollow but do not make the exterior a featureless box. Put exactly one Door in the front wall at height z=1, centered horizontally. The generator repairs the wall around the door, keeps a solid floor underneath, clears only the 1x2 doorway, and aligns the door to the wall. Put at least two Pane blocks in true wall openings on two different exterior walls. Use the corrected wall-facing rotations stated above; the generator rechecks the surrounding wall geometry and overrides bad pane rotations. Do not use signs, chairs, or torches unless requested. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
 
 const PROV={groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"},openrouter:{label:"OpenRouter API key",ph:"sk-or-...",model:"openrouter/free"}};
 const savedKey=p=>localStorage.getItem("key_"+p)||"";
@@ -363,6 +517,11 @@ function show(res,W,H){
   $("stats").innerHTML=cells.length.toLocaleString()+" blocks ("+special+" special), "+res.parts+" parts, "+OUT.length.toLocaleString()+" characters"+
     (res.unknownBlocks.length?'<br><span style="color:var(--bad)">Unknown special block type(s) skipped: '+res.unknownBlocks.join(", ")+'</span>':"")+ 
     (res.filteredDecor?'<br>'+res.filteredDecor+' unrequested decoration block(s) skipped (signs, chairs or torches).':"")+
+    (res.houseAdded?'<br>'+res.houseAdded+' house structure cell(s) repaired or added.':"")+
+    (res.houseWindowsAdded?'<br>'+res.houseWindowsAdded+' house window pane(s) added.':"")+
+    (res.doorRepairs?'<br>'+res.doorRepairs+' doorway framing/position correction(s) applied.':"")+
+    (res.paneRotationsFixed?'<br>'+res.paneRotationsFixed+' pane rotation(s) aligned to their wall direction.':"")+
+    (res.panesSkipped?'<br><span style="color:var(--bad)">'+res.panesSkipped+' pane(s) skipped because no clear wall direction was found.</span>':"")+
     (res.outside?'<br><span style="color:var(--bad)">'+res.outside+" block(s) fell outside the area and were dropped.</span>":"")+
     (top>15?'<br><span style="color:var(--bad)">Heights above 15 are untested in the game. Use the Height test on the terrain page first.</span>':"");
   iso(cells,W,H);
@@ -398,7 +557,7 @@ $("test").onclick=async()=>{
     const good=d.status===200&&d.reply;
     setStatus(good?"Connection works. The model replied: "+d.reply:"The AI service answered HTTP "+d.status+(d.status===200?" with no text":"")+". Details are under Model output.",!good)}
   catch(e){setStatus(e.message,1)}};
-const PAGE_VERSION="r8";
+const PAGE_VERSION="r11";
 fetch("/api/version").then(r=>r.json()).then(v=>{$("ver").textContent="Page "+PAGE_VERSION+", server "+v.version+(v.version===PAGE_VERSION?"":" (mismatch: redeploy or hard refresh)")}).catch(()=>{$("ver").textContent="Page "+PAGE_VERSION+", server version unknown"});
 $("prov").onchange=applyProv;applyProv();
 </script>
