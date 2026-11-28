@@ -141,8 +141,9 @@ const hdr=()=>({"content-type":"application/json","x-ai-key":$("key").value.trim
 let hist=[],OUT="";
 function setStatus(t,bad){const s=$("status");s.textContent=t;s.className=bad?"bad":""}
 async function api(url,opts){
-  const r=await fetch(url,opts);let d;try{d=await r.json()}catch{d={}}
-  if(!r.ok)throw new Error((d.error&&d.error.message)||("Request failed ("+r.status+")"));return d}
+  const r=await fetch(url,opts),raw=await r.text();let d;try{d=JSON.parse(raw)}catch{d=null}
+  if(!r.ok)throw new Error((d&&d.error&&d.error.message)||("Request failed ("+r.status+"): "+raw.slice(0,200)));
+  if(d===null)throw new Error("The server sent something that wasn't JSON: "+raw.slice(0,200));return d}
 async function generate(){
   const key=$("key").value.trim(),prompt=$("prompt").value.trim();
   if(!key)return setStatus("Enter your "+PROV[$("prov").value].label+" first.",1);
@@ -208,7 +209,7 @@ $("test").onclick=async()=>{
     const good=d.status===200&&d.reply;
     setStatus(good?"Connection works. The model replied: "+d.reply:"The AI service answered HTTP "+d.status+(d.status===200?" with no text":"")+". Details are under Model output.",!good)}
   catch(e){setStatus(e.message,1)}};
-const PAGE_VERSION="r5";
+const PAGE_VERSION="r6";
 fetch("/api/version").then(r=>r.json()).then(v=>{$("ver").textContent="Page "+PAGE_VERSION+", server "+v.version+(v.version===PAGE_VERSION?"":" (mismatch: redeploy or hard refresh)")}).catch(()=>{$("ver").textContent="Page "+PAGE_VERSION+", server version unknown"});
 $("prov").onchange=applyProv;applyProv();
 </script>
