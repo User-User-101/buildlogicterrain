@@ -5,24 +5,25 @@ const app = express();
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "300kb" }));
 
-const GH = process.env.GITHUB_BASE || "https://models.github.ai";
 const GROQ = process.env.GROQ_BASE || "https://api.groq.com/openai/v1";
+const OPENROUTER = process.env.OPENROUTER_BASE || "https://openrouter.ai/api/v1";
+// GitHub Models was retired by GitHub on July 30, 2026, so it is no longer offered.
 const PROVIDERS = {
-  github: {
-    chat: GH + "/inference/chat/completions",
-    models: GH + "/catalog/models",
-    headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-    model: "openai/gpt-4.1", tokens: "max_tokens", altTokens: "max_completion_tokens", limit: 4000,
-  },
   groq: {
     chat: GROQ + "/chat/completions",
     models: GROQ + "/models",
     headers: {},
     model: "llama-3.3-70b-versatile", tokens: "max_completion_tokens", altTokens: "max_tokens", limit: 6000,
   },
+  openrouter: {
+    chat: OPENROUTER + "/chat/completions",
+    models: OPENROUTER + "/models",
+    headers: {},
+    model: "openrouter/free", tokens: "max_tokens", altTokens: "max_completion_tokens", limit: 4000,
+  },
 };
 
-const VERSION = "r6";
+const VERSION = "r7";
 const textOf = (raw) => {
   try {
     const c = JSON.parse(raw).choices[0].message.content;
