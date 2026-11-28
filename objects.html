@@ -137,7 +137,7 @@ const num=v=>Number.isFinite(+v)?Math.round(+v):null;
 // Turn the model's parts into ordinary voxels and single special blocks.
 // Cell layout: [x,y,z,color,blockType,rotation,textValue].
 function voxelize(spec,W,D,H,maxCells){
-  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;let outside=0;const unknownBlocks=new Set();
+  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;let outside=0;const unknownBlocks=new Set(),doors=[];
   const put=(x,y,z,col,air,blockType="Block",rotation=null,value="",saveColor=col)=>{
     if(x<0||y<0||z<0||x>=W||y>=D||z>=H){outside++;return}
     if(air)v.delete(key(x,y,z));
@@ -154,6 +154,7 @@ function voxelize(spec,W,D,H,maxCells){
       // A special block with no explicit color must retain its native game color.
       const saveColor=typeof p.color==="string"&&/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(p.color.trim())?col:null;
       put(x,y,z,col,false,type,rot,value,saveColor);
+      if(type==="Door")doors.push({x,y,z,col,rotation:rot,value,saveColor});
     }
     else if(s==="box"){const x=num(p.x),y=num(p.y),z=num(p.z),w=num(p.w),d=num(p.d),h=num(p.h);
       if([x,y,z,w,d,h].some(n=>n===null))continue;
@@ -171,7 +172,27 @@ function voxelize(spec,W,D,H,maxCells){
       if([cx,cy,z,r,h].some(n=>n===null)||r<1)continue;
       for(let i=-r;i<=r;i++)for(let j=-r;j<=r;j++)if(i*i+j*j<=r*r+r*.5)for(let k=0;k<Math.min(h,64);k++)put(cx+i,cy+j,z+k,col,air)}
   }
-  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks]};
+  // A Build Logic door is one save entry but occupies a 1x1x2 vertical
+  // space. Reserve its base cell and the cell directly above it after all
+  // parts have been drawn, so later boxes/beams cannot fill the doorway.
+  const reservedDoorCells=new Set(),validDoors=[];
+  // Remove provisional door cells first. Invalid or overlapping doors must
+  // not leave a one-cell door behind.
+  for(const d of doors){
+    if(d.x>=0&&d.y>=0&&d.z>=0&&d.x<W&&d.y<D&&d.z<H)v.delete(key(d.x,d.y,d.z));
+  }
+  for(const d of doors){
+    if(d.x<0||d.y<0||d.z<0||d.x>=W||d.y>=D||d.z+1>=H){outside++;continue}
+    const base=key(d.x,d.y,d.z),head=key(d.x,d.y,d.z+1);
+    if(reservedDoorCells.has(base)||reservedDoorCells.has(head))continue;
+    reservedDoorCells.add(base);reservedDoorCells.add(head);validDoors.push(d);
+  }
+  for(const k of reservedDoorCells)v.delete(k);
+  for(const d of validDoors){
+    const cell=[d.x,d.y,d.z,d.col,"Door",d.rotation,d.value,d.saveColor];
+    if(v.size<maxCells||v.has(key(d.x,d.y,d.z)))v.set(key(d.x,d.y,d.z),cell);
+  }
+  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length};
 }
 function hollowOut(cells){
   const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
@@ -190,13 +211,14 @@ function parseSpec(text){
 const $=id=>document.getElementById(id);
 function system(W,D,H){return `You design small 3D structures for Build Logic, a voxel building game. Reply with ONE JSON object and nothing else.
 The local build area is ${W} blocks wide (x, 0-${W-1}), ${D} blocks deep (y, 0-${D-1}), and ${H} blocks tall (z, 0-${H-1}); local z=0 is ground. Use integer coordinates only and stay inside the area. IMPORTANT: these are local design coordinates, not raw game coordinates. The generator converts them to Build Logic world coordinates [world X, world Y, world Z] = [origin X + local x, local z (height), origin Z + local y (depth)]. In Build Logic, world Y is vertical; do not put height in world Z.
-Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later parts overwrite earlier ones. Allowed parts:
+Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later parts overwrite earlier ones, EXCEPT doors: doors always reserve their full two-block-high opening after all parts are processed. Allowed parts:
 {"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"} (solid box of ordinary Block cubes; w=x size, d=y size, h=z size)
 {"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"} (ordinary Block beam made from cubes, thick 1-3)
 {"shape":"sphere","cx":0,"cy":0,"cz":0,"rx":3,"ry":3,"rz":3,"color":"#cc5555"}
 {"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}
 {"shape":"block","type":"Chair","x":2,"y":2,"z":0,"rotation":[0,1,0],"color":"#cc5555"} (one special Build Logic block at one grid position; rotation is optional)
 Special block type values: ${Object.keys(BLOCKS).filter(k=>k!=="Block").join(", ")}.
+DOOR RULE (important): Door is 2 blocks tall. Specify its position at the BOTTOM cell, for example {"shape":"block","type":"Door","x":5,"y":2,"z":0,"rotation":[0,1,0]}. The cell directly above it (same x and y, z+1) is part of the door and MUST contain no other block. Make a clear 1-wide by 2-high opening in walls before placing a door. Never draw a wall, floor, beam, furniture, or other block through either door cell. The generator also forcibly clears both door cells after building, so do not rely on overlapping blocks to make a doorway.
 Important: a rotated block is NOT a separate block type. Keep the same type and change its rotation field. A rotation is [rx,ry,rz], each an integer from 0 to 3 (quarter-turn steps). Known orientations from the supplied saves include: Chair [0,1,0] or [0,0,0]; Door [0,1,0] or [0,0,0]; Sign [0,0,0] or [0,1,0]; Sign 1x2 [0,0,0] or [0,1,0]; Slab Chair [0,2,0] or [0,1,0]; Solid Chair [0,1,0] or [0,0,0]; Stair Chair [0,3,0] or [0,2,0]; Trap Door [0,1,0] or [0,2,0]; Corner Pane [0,0,0] or [0,2,0]; Pane [0,0,0] or [0,1,0]; Plate [0,1,0] or [0,3,1]; Slab [0,1,0] or [0,1,1]; 3 Sides Pole [0,1,0] or [0,0,0]; 4 Sides Pole [0,1,0] or [0,2,0]; 4 Sides Pole 2 [0,2,0]; 5 Sides Pole [0,3,2]; 6 Sides Pole [0,3,2] (do not rotate this pole); Corner Pole [0,2,0] or [0,3,0]; Pole [0,3,0] or [0,3,3]; T Pole [0,3,3] or [0,0,3]. The other pole types may use their rotated orientations; do not rotate 6 Sides Pole. Other block rotations may be specified as three integers from 0 to 3. Do not invent separate names for rotated versions.
 For signs, optionally add "text":"Hello" to the block part. Colors are optional hex strings. When omitted on a special block, its native Build Logic color is preserved. Add "air":true to box/line/sphere/cylinder parts to carve out space instead of adding blocks.
 Use special blocks when appropriate for chairs, doors, signs, stairs, panes, poles, plates and slabs; use ordinary Block cubes for general structure. Special blocks occupy one grid position in the save data. The preview approximates each special block as a cube.
