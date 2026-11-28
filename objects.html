@@ -52,7 +52,8 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <label for="prompt">What should it build?</label>
 <textarea id="prompt" rows="4" placeholder="A small stone castle with two towers and a gate. Or: a steel truss bridge made of beams."></textarea>
 <div class="row"><div><label for="size">Footprint (blocks)</label><input id="size" type="number" min="8" max="128" value="40"></div><div><label for="hmax">Max height</label><input id="hmax" type="number" min="1" max="60" value="15"></div></div>
-<div class="row"><div><label for="ox">Place at x</label><input id="ox" type="number" min="0" max="255" value="100"></div><div><label for="oy">Place at y</label><input id="oy" type="number" min="0" max="255" value="100"></div></div>
+<div class="row"><div><label for="ox">Place at world X</label><input id="ox" type="number" min="0" max="255" value="100"></div><div><label for="oy">Place at world Z</label><input id="oy" type="number" min="0" max="255" value="100"></div></div>
+<p class="note">Build Logic coordinates: X and Z are the ground plane; Y is height. The generator converts its design height into world Y automatically.</p>
 <div class="chk"><input id="hollow" type="checkbox" checked><label for="hollow" style="margin:0">Hollow (skip hidden inner blocks)</label></div>
 <div class="row" style="margin-top:14px"><button id="go" type="button">Generate</button><button class="alt" id="reset" type="button">Start over</button></div>
 <p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to the AI service and is not stored on the server. Get a free key at console.groq.com or openrouter.ai.</p>
@@ -69,10 +70,13 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 </div>
 </main>
 <script>
-// Build Logic save format: encoded block name + encoded position (4 BL64 chars)
+// Build Logic save format: encoded block name + encoded world position (4 BL64 chars)
 // + rotation (1 BL64 char) + optional color (4 BL64 chars) + optional /value.
-// The block-name codes and vec3/rotation packing follow the reverse-engineered
-// Build Logic format documented at https://github.com/I-OCode/bl.
+// Build Logic uses Roblox world axes: X = width, Y = vertical height, Z = depth.
+// The model uses local X/Y for its footprint and local Z for height; show() maps
+// [local X, local Y, local Z] to [world X, world Y, world Z] before encoding.
+// BL64 vectors and rotations follow the reverse-engineered format documented at
+// https://github.com/I-OCode/bl.
 const AL="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$";
 function enc64(v){if(!Number.isInteger(v)||v<0||v>63)throw new RangeError("BL64 value must be from 0 to 63");return AL[v]}
 function encVec3(v){
@@ -185,7 +189,7 @@ function parseSpec(text){
 }
 const $=id=>document.getElementById(id);
 function system(W,D,H){return `You design small 3D structures for Build Logic, a voxel building game. Reply with ONE JSON object and nothing else.
-The build area is ${W} blocks wide (x, 0-${W-1}), ${D} deep (y, 0-${D-1}) and ${H} tall (z, 0-${H-1}); z=0 is the ground. Use integer coordinates only and stay inside the area.
+The local build area is ${W} blocks wide (x, 0-${W-1}), ${D} blocks deep (y, 0-${D-1}), and ${H} blocks tall (z, 0-${H-1}); local z=0 is ground. Use integer coordinates only and stay inside the area. IMPORTANT: these are local design coordinates, not raw game coordinates. The generator converts them to Build Logic world coordinates [world X, world Y, world Z] = [origin X + local x, local z (height), origin Z + local y (depth)]. In Build Logic, world Y is vertical; do not put height in world Z.
 Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later parts overwrite earlier ones. Allowed parts:
 {"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"} (solid box of ordinary Block cubes; w=x size, d=y size, h=z size)
 {"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"} (ordinary Block beam made from cubes, thick 1-3)
@@ -236,7 +240,10 @@ function show(res,W,H){
   let cells=$("hollow").checked?hollowOut(res.cells):res.cells;
   let ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0);
   if(ox+W>256){ox=256-W;$("ox").value=ox}if(oy+W>256){oy=256-W;$("oy").value=oy}
-  OUT=cells.map(c=>encodeBuildLogicBlock(c[4]||"Block",ox+c[0],oy+c[1],c[2],c[7],c[5],c[6])).join(";");$("out").value=OUT;
+  // Model cells use [x, depth, height]. Build Logic world positions use [X, Y, Z],
+  // where Y is vertical and Z is depth. This axis conversion is essential: without
+  // it, buildings are written sideways/up in the wrong world coordinate.
+  OUT=cells.map(c=>encodeBuildLogicBlock(c[4]||"Block",ox+c[0],c[2],oy+c[1],c[7],c[5],c[6])).join(";");$("out").value=OUT;
   const top=Math.max(...cells.map(c=>c[2])),special=cells.filter(c=>c[4]&&c[4]!=="Block").length;
   $("stats").innerHTML=cells.length.toLocaleString()+" blocks ("+special+" special), "+res.parts+" parts, "+OUT.length.toLocaleString()+" characters"+
     (res.unknownBlocks.length?'<br><span style="color:var(--bad)">Unknown special block type(s) skipped: '+res.unknownBlocks.join(", ")+'</span>':"")+ 
