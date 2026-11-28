@@ -136,8 +136,10 @@ const num=v=>Number.isFinite(+v)?Math.round(+v):null;
 
 // Turn the model's parts into ordinary voxels and single special blocks.
 // Cell layout: [x,y,z,color,blockType,rotation,textValue].
-function voxelize(spec,W,D,H,maxCells){
-  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;let outside=0;const unknownBlocks=new Set(),doors=[];
+function voxelize(spec,W,D,H,maxCells,requestText=""){
+  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;
+  let outside=0,filteredDecor=0;
+  const unknownBlocks=new Set(),specials=[];
   const put=(x,y,z,col,air,blockType="Block",rotation=null,value="",saveColor=col)=>{
     if(x<0||y<0||z<0||x>=W||y>=D||z>=H){outside++;return}
     if(air)v.delete(key(x,y,z));
@@ -151,10 +153,9 @@ function voxelize(spec,W,D,H,maxCells){
       if([x,y,z].some(n=>n===null))continue;
       if(!BLOCKS[type]){unknownBlocks.add(type);continue}
       const rot=normalRotation(p.rotation,BLOCKS[type].rotation),value=typeof p.text==="string"?p.text:"";
-      // A special block with no explicit color must retain its native game color.
       const saveColor=typeof p.color==="string"&&/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(p.color.trim())?col:null;
-      put(x,y,z,col,false,type,rot,value,saveColor);
-      if(type==="Door")doors.push({x,y,z,col,rotation:rot,value,saveColor});
+      if(type==="Block")put(x,y,z,col,air);
+      else specials.push({x,y,z,col,type,rotation:rot,value,saveColor,wallAxis:p.wallAxis||""});
     }
     else if(s==="box"){const x=num(p.x),y=num(p.y),z=num(p.z),w=num(p.w),d=num(p.d),h=num(p.h);
       if([x,y,z,w,d,h].some(n=>n===null))continue;
@@ -172,27 +173,94 @@ function voxelize(spec,W,D,H,maxCells){
       if([cx,cy,z,r,h].some(n=>n===null)||r<1)continue;
       for(let i=-r;i<=r;i++)for(let j=-r;j<=r;j++)if(i*i+j*j<=r*r+r*.5)for(let k=0;k<Math.min(h,64);k++)put(cx+i,cy+j,z+k,col,air)}
   }
-  // A Build Logic door is one save entry but occupies a 1x1x2 vertical
-  // space. Reserve its base cell and the cell directly above it after all
-  // parts have been drawn, so later boxes/beams cannot fill the doorway.
-  const reservedDoorCells=new Set(),validDoors=[];
-  // Remove provisional door cells first. Invalid or overlapping doors must
-  // not leave a one-cell door behind.
-  for(const d of doors){
-    if(d.x>=0&&d.y>=0&&d.z>=0&&d.x<W&&d.y<D&&d.z<H)v.delete(key(d.x,d.y,d.z));
+
+  // Signs are wall decorations, not structural wall blocks. Do not let the
+  // model invent a "Home" sign unless the user actually requested signage.
+  const wantsSign=/\b(sign|signs|signage|label|labels|lettering|write on|text on|welcome sign)\b/i.test(requestText);
+  const wantsFurniture=/\b(chair|chairs|seating|furniture|furnished|sofa|couch|stool)\b/i.test(requestText);
+  const wantsTorch=/\b(torch|torches|lighting|lights|lit|lamp|lamps)\b/i.test(requestText);
+  const kept=[];
+  for(const item of specials){
+    if((item.type==="Sign"||item.type==="Sign 1x2")&&!wantsSign){filteredDecor++;continue}
+    if(["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type)&&!wantsFurniture){filteredDecor++;continue}
+    if(item.type==="Torch"&&!wantsTorch){filteredDecor++;continue}
+    kept.push(item);
   }
-  for(const d of doors){
-    if(d.x<0||d.y<0||d.z<0||d.x>=W||d.y>=D||d.z+1>=H){outside++;continue}
+
+  const isOrdinary=(x,y,z)=>{const c=v.get(key(x,y,z));return !!c&&c[4]==="Block"};
+  const floorSupportAt=(x,y)=>{
+    if(isOrdinary(x,y,0))return true;
+    let n=0;
+    if(isOrdinary(x-1,y,0))n++;
+    if(isOrdinary(x+1,y,0))n++;
+    if(isOrdinary(x,y-1,0))n++;
+    if(isOrdinary(x,y+1,0))n++;
+    return n>=2;
+  };
+  const wallScores=(x,y,z)=>({
+    // More ordinary blocks to either side means the wall runs along that axis.
+    x:(isOrdinary(x-1,y,z)?1:0)+(isOrdinary(x+1,y,z)?1:0),
+    y:(isOrdinary(x,y-1,z)?1:0)+(isOrdinary(x,y+1,z)?1:0)
+  });
+
+  // Place special items only after the structural cubes have been generated.
+  // This lets furniture sit on top of a floor, and lets window panes replace
+  // only the intended wall cell instead of being overwritten by later boxes.
+  const finalSpecials=[];
+  for(const item of kept){
+    let {x,y,z}=item;
+    const isFurniture=["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type);
+    const isPane=item.type==="Pane"||item.type==="Corner Pane";
+    // In a house the floor occupies local height 0. If a special object was
+    // mistakenly put in that floor layer, lift it onto the floor surface.
+    if(z===0&&floorSupportAt(x,y)&&(isFurniture||item.type==="Door"||isPane||item.type==="Sign"||item.type==="Sign 1x2"))z=1;
+    // If furniture still collides with a solid wall/cube at its chosen cell,
+    // move it upward until its cell is clear or the build ceiling is reached.
+    if(isFurniture){while(z<H&&isOrdinary(x,y,z))z++;}
+    if(isPane){
+      const sc=wallScores(x,y,z);
+      const axis=item.wallAxis|| (sc.x>sc.y?"x":sc.y>sc.x?"y":"");
+      if(axis==="x")item.rotation=[0,0,0];
+      else if(axis==="y")item.rotation=item.type==="Corner Pane"?[0,2,0]:[0,1,0];
+      // If the pane is on a corner or has no clear wall neighbors, retain the
+      // model's rotation rather than guessing.
+    }
+    finalSpecials.push({...item,x,y,z});
+  }
+
+  const reservedDoorCells=new Set(),validDoors=[];
+  const nonDoors=new Map();
+  for(const item of finalSpecials){
+    if(item.type==="Door"){
+      // A door is one saved block with a built-in two-cell vertical model.
+      // When a floor is present, its bottom must start one cell above z=0.
+      if(item.z===0&&floorSupportAt(item.x,item.y))item.z=1;
+      if(item.x<0||item.y<0||item.z<0||item.x>=W||item.y>=D||item.z+1>=H){outside++;continue}
+      validDoors.push(item);
+    }else{
+      nonDoors.set(key(item.x,item.y,item.z),item);
+    }
+  }
+
+  // Doors reserve their bottom and top cells after every wall/floor operation.
+  for(const d of validDoors){
     const base=key(d.x,d.y,d.z),head=key(d.x,d.y,d.z+1);
     if(reservedDoorCells.has(base)||reservedDoorCells.has(head))continue;
-    reservedDoorCells.add(base);reservedDoorCells.add(head);validDoors.push(d);
+    reservedDoorCells.add(base);reservedDoorCells.add(head);
   }
-  for(const k of reservedDoorCells)v.delete(k);
+  for(const k of reservedDoorCells){v.delete(k);nonDoors.delete(k)}
+
+  // Add furniture, panes and other special blocks after cubes so they cannot
+  // disappear underneath a later wall/floor part.
+  for(const [k,item] of nonDoors){
+    if(v.size<maxCells||v.has(k))v.set(k,[item.x,item.y,item.z,item.col,item.type,item.rotation,item.value,item.saveColor]);
+  }
+  // Doors take priority over anything that accidentally overlaps the opening.
   for(const d of validDoors){
-    const cell=[d.x,d.y,d.z,d.col,"Door",d.rotation,d.value,d.saveColor];
-    if(v.size<maxCells||v.has(key(d.x,d.y,d.z)))v.set(key(d.x,d.y,d.z),cell);
+    const k=key(d.x,d.y,d.z);
+    if(reservedDoorCells.has(k)&&(v.size<maxCells||v.has(k)))v.set(k,[d.x,d.y,d.z,d.col,"Door",d.rotation,d.value,d.saveColor]);
   }
-  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length};
+  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length,filteredDecor};
 }
 function hollowOut(cells){
   const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
@@ -210,19 +278,23 @@ function parseSpec(text){
 }
 const $=id=>document.getElementById(id);
 function system(W,D,H){return `You design small 3D structures for Build Logic, a voxel building game. Reply with ONE JSON object and nothing else.
-The local build area is ${W} blocks wide (x, 0-${W-1}), ${D} blocks deep (y, 0-${D-1}), and ${H} blocks tall (z, 0-${H-1}); local z=0 is ground. Use integer coordinates only and stay inside the area. IMPORTANT: these are local design coordinates, not raw game coordinates. The generator converts them to Build Logic world coordinates [world X, world Y, world Z] = [origin X + local x, local z (height), origin Z + local y (depth)]. In Build Logic, world Y is vertical; do not put height in world Z.
-Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later parts overwrite earlier ones, EXCEPT doors: doors always reserve their full two-block-high opening after all parts are processed. Allowed parts:
-{"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"} (solid box of ordinary Block cubes; w=x size, d=y size, h=z size)
+The local build area is ${W} blocks wide (x, 0-${W-1}), ${D} blocks deep (y, 0-${D-1}), and ${H} blocks tall (z, 0-${H-1}); local z=0 is the ground/floor layer. Use integer coordinates only and stay inside the area. The generator converts local [x, depth, height] into Build Logic world [X, Y, Z] = [origin X + x, height, origin Z + depth]. Build Logic world Y is vertical.
+Format: {"name":"short name","parts":[ ... ]}. Allowed parts:
+{"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"} (solid box of ordinary Block cubes; w=x size, d=depth size, h=height size)
 {"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"} (ordinary Block beam made from cubes, thick 1-3)
 {"shape":"sphere","cx":0,"cy":0,"cz":0,"rx":3,"ry":3,"rz":3,"color":"#cc5555"}
 {"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}
-{"shape":"block","type":"Chair","x":2,"y":2,"z":0,"rotation":[0,1,0],"color":"#cc5555"} (one special Build Logic block at one grid position; rotation is optional)
+{"shape":"block","type":"Pane","x":2,"y":0,"z":2,"wallAxis":"x","rotation":[0,0,0]} (one special Build Logic block; wallAxis is optional and may be x or y)
 Special block type values: ${Object.keys(BLOCKS).filter(k=>k!=="Block").join(", ")}.
-DOOR RULE (important): Door is 2 blocks tall. Specify its position at the BOTTOM cell, for example {"shape":"block","type":"Door","x":5,"y":2,"z":0,"rotation":[0,1,0]}. The cell directly above it (same x and y, z+1) is part of the door and MUST contain no other block. Make a clear 1-wide by 2-high opening in walls before placing a door. Never draw a wall, floor, beam, furniture, or other block through either door cell. The generator also forcibly clears both door cells after building, so do not rely on overlapping blocks to make a doorway.
-Important: a rotated block is NOT a separate block type. Keep the same type and change its rotation field. A rotation is [rx,ry,rz], each an integer from 0 to 3 (quarter-turn steps). Known orientations from the supplied saves include: Chair [0,1,0] or [0,0,0]; Door [0,1,0] or [0,0,0]; Sign [0,0,0] or [0,1,0]; Sign 1x2 [0,0,0] or [0,1,0]; Slab Chair [0,2,0] or [0,1,0]; Solid Chair [0,1,0] or [0,0,0]; Stair Chair [0,3,0] or [0,2,0]; Trap Door [0,1,0] or [0,2,0]; Corner Pane [0,0,0] or [0,2,0]; Pane [0,0,0] or [0,1,0]; Plate [0,1,0] or [0,3,1]; Slab [0,1,0] or [0,1,1]; 3 Sides Pole [0,1,0] or [0,0,0]; 4 Sides Pole [0,1,0] or [0,2,0]; 4 Sides Pole 2 [0,2,0]; 5 Sides Pole [0,3,2]; 6 Sides Pole [0,3,2] (do not rotate this pole); Corner Pole [0,2,0] or [0,3,0]; Pole [0,3,0] or [0,3,3]; T Pole [0,3,3] or [0,0,3]. The other pole types may use their rotated orientations; do not rotate 6 Sides Pole. Other block rotations may be specified as three integers from 0 to 3. Do not invent separate names for rotated versions.
-For signs, optionally add "text":"Hello" to the block part. Colors are optional hex strings. When omitted on a special block, its native Build Logic color is preserved. Add "air":true to box/line/sphere/cylinder parts to carve out space instead of adding blocks.
-Use special blocks when appropriate for chairs, doors, signs, stairs, panes, poles, plates and slabs; use ordinary Block cubes for general structure. Special blocks occupy one grid position in the save data. The preview approximates each special block as a cube.
-Prefer few large parts over many small ones. Keep the design well proportioned and sitting on the ground at z=0. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
+STRUCTURE RULES: Use ordinary Block cubes for all floors, walls, roofs, frames and foundations. Never use a chair, sign, pane, torch, plate, slab or pole as a substitute for an ordinary structural wall/floor cube. Do not overlap special objects with floors or walls except a Pane intentionally placed in a window opening. Avoid duplicate blocks at the same coordinates.
+FLOOR AND DOOR RULES: For a house, make a continuous floor at local z=0. Walls start at z=1. The Door is a single special block whose built-in model is 2 blocks tall; place its bottom at local z=1 (not z=0), leave the two wall cells at that x,y,z=1 and z=2 open, and continue the wall above z=2. Do not create a second block above or below the Door. The generator also moves a door out of an overlapping floor cell and clears only its 2-cell-tall doorway. Keep floor blocks at z=0 intact.
+FURNITURE RULES: Only add chairs (Chair, Slab Chair, Solid Chair, Stair Chair) when the user explicitly asks for chairs, seating or furnished interiors. Put them inside the building, on top of the floor at z=1, with an empty cell at their position; never put them at z=0 or inside a floor/wall. The generator corrects a chair that collides with the floor, but do not rely on that correction.
+WINDOW RULES: For ordinary house windows, use Pane, not Corner Pane. Put panes only in intentional 1x1 openings in vertical outer walls, normally at z=2 or z=3. They are glass window inserts, not blocks to scatter around or place in floors/roofs. Set wallAxis to "x" when the wall runs along local x and to "y" when it runs along local depth y. For Pane, wallAxis x uses rotation [0,0,0] and wallAxis y uses rotation [0,1,0]. Use Corner Pane only for an actual glass corner. Keep panes vertical and flush with the wall.
+SIGN RULES: Never add a Sign or Sign 1x2 to an ordinary house unless the user specifically asks for a sign or text decoration. Never invent a "Home" sign. A sign is a decoration, not a wall block. Only use its text field when signage was requested.
+OTHER DECORATION: Do not add torches unless the user asks for torches or lighting. Use Plate, Slab, poles and stair blocks only when they serve a clear design purpose; do not substitute them for wall cubes.
+For a special block use {"shape":"block","type":"Chair","x":2,"y":2,"z":1,"rotation":[0,1,0],"color":"#cc5555"}. Rotation is optional. Known useful rotations from supplied saves: Chair [0,1,0] or [0,0,0]; Door [0,1,0] or [0,0,0]; Sign [0,0,0] or [0,1,0]; Sign 1x2 [0,0,0] or [0,1,0]; Slab Chair [0,2,0] or [0,1,0]; Solid Chair [0,1,0] or [0,0,0]; Stair Chair [0,3,0] or [0,2,0]; Stair [0,0,0] or [0,1,0]; Trap Door [0,1,0] or [0,2,0]; Corner Pane [0,0,0] or [0,2,0]; Pane [0,0,0] or [0,1,0]; Plate [0,1,0] or [0,3,1]; Slab [0,1,0] or [0,1,1]; 3 Sides Pole [0,1,0] or [0,0,0]; 4 Sides Pole [0,1,0] or [0,2,0]; 4 Sides Pole 2 [0,2,0]; 5 Sides Pole [0,3,2]; 6 Sides Pole [0,3,2] (do not rotate this pole); Corner Pole [0,2,0] or [0,3,0]; Pole [0,3,0] or [0,3,3]; T Pole [0,3,3] or [0,0,3]. Rotation values are [rx,ry,rz], each 0-3. A rotated block is the same type with a different rotation, not a separate type.
+For signs, optionally add "text":"Hello". Colors are optional hex strings. When omitted on a special block, its native Build Logic color is preserved. Add "air":true to box/line/sphere/cylinder parts to carve out space.
+Design realistic proportions and provide enough space for doors and windows. For a small house, include a floor, walls with a proper doorway, a roof, and a few windows; do not add random furniture or signage. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
 
 const PROV={groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"},openrouter:{label:"OpenRouter API key",ph:"sk-or-...",model:"openrouter/free"}};
 const savedKey=p=>localStorage.getItem("key_"+p)||"";
@@ -251,7 +323,7 @@ async function generate(){
     const spec=parseSpec(text);
     if(!spec){$("json").parentElement.open=true;
       throw new Error(!text?"The model sent an empty reply"+(ch&&ch.finish_reason?" (finish reason: "+ch.finish_reason+")":"")+". The full response is shown under Model output below. Try another model from the list.":cut?"The reply was cut off before the design finished. Try a smaller footprint or a simpler description.":"The reply was not a usable design. The raw reply is shown under Model output below.")}
-    const res=voxelize(spec,W,W,H,40000);
+    const res=voxelize(spec,W,W,H,40000,prompt);
     if(!res.cells.length)throw new Error("The design came out empty. Try again with more detail.");
     hist.push({role:"user",content:prompt},{role:"assistant",content:JSON.stringify(spec)});if(hist.length>8)hist=hist.slice(-8);
     $("json").textContent=JSON.stringify(spec,null,1);
@@ -269,6 +341,7 @@ function show(res,W,H){
   const top=Math.max(...cells.map(c=>c[2])),special=cells.filter(c=>c[4]&&c[4]!=="Block").length;
   $("stats").innerHTML=cells.length.toLocaleString()+" blocks ("+special+" special), "+res.parts+" parts, "+OUT.length.toLocaleString()+" characters"+
     (res.unknownBlocks.length?'<br><span style="color:var(--bad)">Unknown special block type(s) skipped: '+res.unknownBlocks.join(", ")+'</span>':"")+ 
+    (res.filteredDecor?'<br>'+res.filteredDecor+' unrequested decoration block(s) skipped (signs, chairs or torches).':"")+
     (res.outside?'<br><span style="color:var(--bad)">'+res.outside+" block(s) fell outside the area and were dropped.</span>":"")+
     (top>15?'<br><span style="color:var(--bad)">Heights above 15 are untested in the game. Use the Height test on the terrain page first.</span>':"");
   iso(cells,W,H);
