@@ -139,8 +139,14 @@ const num=v=>Number.isFinite(+v)?Math.round(+v):null;
 // Cell layout: [x,y,z,color,blockType,rotation,textValue].
 function voxelize(spec,W,D,H,maxCells,requestText=""){
   const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;
-  let outside=0,filteredDecor=0;
+  let outside=0,filteredDecor=0,houseFurnitureAdded=0;
   const unknownBlocks=new Set(),specials=[];
+  const wantsHouse=/\b(house|home|cottage|cabin|bungalow)\b/i.test(requestText);
+  const wantsSign=/\b(sign|signs|signage|label|labels|lettering|write on|text on|welcome sign)\b/i.test(requestText);
+  const wantsTable=/\b(table|tables|dining table|coffee table|desk)\b/i.test(requestText);
+  const wantsChairs=/\b(chair|chairs|seating|furniture|furnished|sofa|couch|stool)\b/i.test(requestText);
+  const wantsFurniture=wantsChairs||wantsTable;
+  const wantsTorch=/\b(torch|torches|lighting|lights|lit|lamp|lamps)\b/i.test(requestText);
   const put=(x,y,z,col,air,blockType="Block",rotation=null,value="",saveColor=col)=>{
     if(x<0||y<0||z<0||x>=W||y>=D||z>=H){outside++;return}
     if(air)v.delete(key(x,y,z));
@@ -149,6 +155,10 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
   for(const p of parts){
     if(!p||typeof p!=="object")continue;
     const col=hexColor(p.color),air=!!p.air,s=p.shape;
+    // Requested house furniture is generated deterministically below. Ignore
+    // furniture geometry that the model tries to scatter around the build.
+    const role=String(p.role||p.purpose||p.furnitureRole||"").toLowerCase();
+    if(wantsHouse&&(wantsTable||wantsChairs)&&(/table|furniture|chair|seat/.test(role)||s==="table"||s==="furniture"))continue;
     if(s==="block"){
       const x=num(p.x),y=num(p.y),z=num(p.z),type=String(p.type||p.block||"Block");
       if([x,y,z].some(n=>n===null))continue;
@@ -190,10 +200,6 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     for(const c of v.values())if(c[4]==="Block")return c[3].slice();
     return[145,145,145];
   };
-  const wantsHouse=/\b(house|home|cottage|cabin|bungalow)\b/i.test(requestText);
-  const wantsSign=/\b(sign|signs|signage|label|labels|lettering|write on|text on|welcome sign)\b/i.test(requestText);
-  const wantsFurniture=/\b(chair|chairs|seating|furniture|furnished|sofa|couch|stool)\b/i.test(requestText);
-  const wantsTorch=/\b(torch|torches|lighting|lights|lit|lamp|lamps)\b/i.test(requestText);
   let houseBounds=null,houseWallTop=0,houseFrontY=null,houseBackY=null,houseLeftX=null,houseRightX=null;
   let houseAdded=0,houseWindowsAdded=0,doorRepairs=0,paneRotationsFixed=0,panesSkipped=0;
 
@@ -346,12 +352,77 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     }
   }
 
+  // Build requested dining furniture ourselves instead of trusting model
+  // coordinates. Tables stay inside the room and chairs never land on roofs.
+  const houseFurnitureChairs=[];
+  if(wantsHouse&&houseBounds&&houseFrontY!==null&&(wantsTable||wantsChairs)){
+    // Discard model-positioned chairs and recreate them at clear interior cells.
+    for(let i=specials.length-1;i>=0;i--){
+      if(["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(specials[i].type))specials.splice(i,1);
+    }
+    const inner={
+      minX:Math.min(houseLeftX,houseRightX)+1,
+      maxX:Math.max(houseLeftX,houseRightX)-1,
+      minY:Math.min(houseFrontY,houseBackY)+1,
+      maxY:Math.max(houseFrontY,houseBackY)-1
+    };
+    const doorX=Math.floor((houseBounds.minX+houseBounds.maxX)/2);
+    const inside=(x,y)=>x>=inner.minX&&x<=inner.maxX&&y>=inner.minY&&y<=inner.maxY;
+    const clearCell=(x,y,z)=>inside(x,y)&&!isOrdinary(x,y,z);
+    const seatsFor=(tx,ty)=>[
+      {x:tx-1,y:ty,rotation:[0,1,0]},
+      {x:tx+2,y:ty+1,rotation:[0,0,0]},
+      {x:tx,y:ty-1,rotation:[0,0,0]},
+      {x:tx+1,y:ty+2,rotation:[0,1,0]}
+    ].filter(c=>clearCell(c.x,c.y,1)&&clearCell(c.x,c.y,2)
+      &&!(c.y===houseFrontY+1&&Math.abs(c.x-doorX)<=1));
+
+    if(wantsTable){
+      let best=null;
+      const cx=(inner.minX+inner.maxX)/2,cy=(inner.minY+inner.maxY)/2;
+      // Find a clear 2x2 footprint and prefer the center without blocking the door.
+      for(let tx=inner.minX;tx<=inner.maxX-1;tx++)for(let ty=inner.minY;ty<=inner.maxY-1;ty++){
+        const footprint=[[tx,ty],[tx+1,ty],[tx,ty+1],[tx+1,ty+1]];
+        if(!footprint.every(([x,y])=>clearCell(x,y,1)&&clearCell(x,y,2)))continue;
+        const seats=seatsFor(tx,ty);
+        const doorPenalty=ty<=houseFrontY+2&&doorX>=tx-1&&doorX<=tx+2?8:0;
+        const score=Math.abs(tx+.5-cx)+Math.abs(ty+.5-cy)+(4-seats.length)*5+doorPenalty;
+        if(!best||score<best.score)best={tx,ty,seats,score};
+      }
+      if(best){
+        const wood=[137,91,54];
+        // Four legs and a 2x2 tabletop. Legs occupy z=1; top occupies z=2.
+        for(const [x,y] of [[best.tx,best.ty],[best.tx+1,best.ty],[best.tx,best.ty+1],[best.tx+1,best.ty+1]]){
+          putOrdinary(x,y,1,wood);putOrdinary(x,y,2,wood);houseFurnitureAdded+=2;
+        }
+        if(wantsChairs)for(const seat of best.seats.slice(0,4))houseFurnitureChairs.push({
+          x:seat.x,y:seat.y,z:1,col:[150,150,155],type:"Chair",
+          rotation:seat.rotation,value:"",saveColor:null,wallAxis:""
+        });
+      }
+    }else if(wantsChairs){
+      // Chairs-only house: choose clear cells inside the room, away from door.
+      const candidates=[];
+      for(let x=inner.minX;x<=inner.maxX;x++)for(let y=inner.minY;y<=inner.maxY;y++){
+        if(!clearCell(x,y,1)||!clearCell(x,y,2))continue;
+        if(y===houseFrontY+1&&Math.abs(x-doorX)<=1)continue;
+        candidates.push({x,y,score:Math.abs(x-doorX)+Math.abs(y-(houseFrontY+2))});
+      }
+      candidates.sort((a,b)=>a.score-b.score);
+      for(const seat of candidates.slice(0,2))houseFurnitureChairs.push({
+        x:seat.x,y:seat.y,z:1,col:[150,150,155],type:"Chair",
+        rotation:[0,1,0],value:"",saveColor:null,wallAxis:""
+      });
+    }
+  }
+
   // Signs and furniture are decorations, never wall/floor replacements unless
   // the user specifically asked for them.
   const kept=[];
   for(const item of specials){
     if((item.type==="Sign"||item.type==="Sign 1x2")&&!wantsSign){filteredDecor++;continue}
     if(["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type)&&!wantsFurniture){filteredDecor++;continue}
+    if(wantsHouse&&houseBounds&&(wantsTable||wantsChairs)&&["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type))continue;
     if(item.type==="Torch"&&!wantsTorch){filteredDecor++;continue}
     if(item.type==="Block")continue;
     kept.push(item);
@@ -363,9 +434,9 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     const isFurniture=["Chair","Slab Chair","Solid Chair","Stair Chair"].includes(item.type);
     const isPane=item.type==="Pane"||item.type==="Corner Pane";
     if(isFurniture){
-      // Chairs are floor furniture: z=1 is the first cell above the floor.
+      // Do not push collisions upward: that is how chairs ended up on roofs.
       if(z<=0)z=1;
-      while(z<H&&isOrdinary(x,y,z))z++;
+      if(isOrdinary(x,y,z)){filteredDecor++;continue;}
     }
     if(isPane){
       const axis=inferWallAxis(x,y,z,item.wallAxis||"",3);
@@ -385,6 +456,7 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     }
     finalSpecials.push({...item,x,y,z});
   }
+  for(const chair of houseFurnitureChairs)finalSpecials.push(chair);
 
   // Doors are two cells high, but occupy one saved block. Only remove those
   // two wall cells; retain the floor, side jambs, and the lintel above.
@@ -435,7 +507,7 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     const k=key(d.x,d.y,d.z);
     if(v.size<maxCells||v.has(k))v.set(k,[d.x,d.y,d.z,d.col,"Door",d.rotation,d.value,d.saveColor]);
   }
-  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length,filteredDecor,houseAdded,houseWindowsAdded,doorRepairs,paneRotationsFixed,panesSkipped};
+  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks],doors:validDoors.length,filteredDecor,houseAdded,houseWindowsAdded,doorRepairs,paneRotationsFixed,panesSkipped,houseFurnitureAdded,houseChairsAdded:houseFurnitureChairs.length};
 }
 function hollowOut(cells){
   const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
@@ -463,7 +535,7 @@ Format: {"name":"short name","parts":[ ... ]}. Allowed parts:
 Special block type values: ${Object.keys(BLOCKS).filter(k=>k!=="Block").join(", ")}.
 STRUCTURE RULES: Use ordinary Block cubes for all floors, walls, roofs, frames and foundations. Never use a chair, sign, pane, torch, plate, slab or pole as a substitute for an ordinary structural wall/floor cube. Do not overlap special objects with floors or walls except a Pane intentionally placed in a window opening. Avoid duplicate blocks at the same coordinates.
 FLOOR AND DOOR RULES: For a house, make a continuous floor at local z=0. Walls start at z=1. The Door is a single special block whose built-in model is 2 blocks tall; place its bottom at local z=1 (not z=0), leave the two wall cells at that x,y,z=1 and z=2 open, and continue the wall above z=2. Do not create a second block above or below the Door. The generator also moves a door out of an overlapping floor cell and clears only its 2-cell-tall doorway. Keep floor blocks at z=0 intact.
-FURNITURE RULES: Only add chairs (Chair, Slab Chair, Solid Chair, Stair Chair) when the user explicitly asks for chairs, seating or furnished interiors. Put them inside the building, on top of the floor at z=1, with an empty cell at their position; never put them at z=0 or inside a floor/wall. The generator corrects a chair that collides with the floor, but do not rely on that correction.
+FURNITURE RULES: For a house request that mentions a table, chairs, seating or furniture, do NOT create table or chair geometry yourself. Do not use boxes, lines, cylinders, spheres or brown blocks to represent tables; do not put chairs on roofs, porches, outside walls or in floor/wall cells. The generator builds a table and places requested chairs automatically in clear interior floor cells. For other designs, only add chairs when explicitly requested, at z=1 above the floor.
 WINDOW RULES: For ordinary house windows, use Pane, not Corner Pane. Put panes only in intentional 1x1 openings in vertical outer walls, normally at z=2 or z=3. They are glass window inserts, not blocks to scatter around or place in floors/roofs. Set wallAxis to "x" when the wall runs along local x and to "y" when it runs along local depth y. For Pane, use the corrected wall-facing mapping: a wall that runs along local x uses rotation [0,1,0], and a wall that runs along local depth y uses rotation [0,0,0]. This mapping is enforced after generation from the actual wall supports, so do not guess. Use Corner Pane only for an actual glass corner. Keep panes vertical and flush with the wall.
 SIGN RULES: Never add a Sign or Sign 1x2 to an ordinary house unless the user specifically asks for a sign or text decoration. Never invent a "Home" sign. A sign is a decoration, not a wall block. Only use its text field when signage was requested.
 OTHER DECORATION: Do not add torches unless the user asks for torches or lighting. Use Plate, Slab, poles and stair blocks only when they serve a clear design purpose; do not substitute them for wall cubes.
@@ -520,6 +592,8 @@ function show(res,W,H){
     (res.houseAdded?'<br>'+res.houseAdded+' house structure cell(s) repaired or added.':"")+
     (res.houseWindowsAdded?'<br>'+res.houseWindowsAdded+' house window pane(s) added.':"")+
     (res.doorRepairs?'<br>'+res.doorRepairs+' doorway framing/position correction(s) applied.':"")+
+    (res.houseFurnitureAdded?'<br>'+res.houseFurnitureAdded+' interior table block(s) placed.':"")+
+    (res.houseChairsAdded?'<br>'+res.houseChairsAdded+' chair(s) placed inside the house.':"")+
     (res.paneRotationsFixed?'<br>'+res.paneRotationsFixed+' pane rotation(s) aligned to their wall direction.':"")+
     (res.panesSkipped?'<br><span style="color:var(--bad)">'+res.panesSkipped+' pane(s) skipped because no clear wall direction was found.</span>':"")+
     (res.outside?'<br><span style="color:var(--bad)">'+res.outside+" block(s) fell outside the area and were dropped.</span>":"")+
@@ -557,7 +631,7 @@ $("test").onclick=async()=>{
     const good=d.status===200&&d.reply;
     setStatus(good?"Connection works. The model replied: "+d.reply:"The AI service answered HTTP "+d.status+(d.status===200?" with no text":"")+". Details are under Model output.",!good)}
   catch(e){setStatus(e.message,1)}};
-const PAGE_VERSION="r11";
+const PAGE_VERSION="r12";
 fetch("/api/version").then(r=>r.json()).then(v=>{$("ver").textContent="Page "+PAGE_VERSION+", server "+v.version+(v.version===PAGE_VERSION?"":" (mismatch: redeploy or hard refresh)")}).catch(()=>{$("ver").textContent="Page "+PAGE_VERSION+", server version unknown"});
 $("prov").onchange=applyProv;applyProv();
 </script>
