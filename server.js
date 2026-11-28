@@ -22,6 +22,14 @@ const PROVIDERS = {
   },
 };
 
+const VERSION = "r5";
+const textOf = (raw) => {
+  try {
+    const c = JSON.parse(raw).choices[0].message.content;
+    return Array.isArray(c) ? c.map((p) => (p && p.text) || "").join("") : c || "";
+  } catch { return ""; }
+};
+
 const page = (name) => (_req, res) => {
   const f = path.join(__dirname, name);
   if (!fs.existsSync(f)) return res.status(500).send(name + " is missing next to server.js");
@@ -30,6 +38,7 @@ const page = (name) => (_req, res) => {
 app.get("/", page("index.html"));
 app.get("/objects", page("objects.html"));
 app.get("/healthz", (_req, res) => res.send("ok"));
+app.get("/api/version", (_req, res) => res.json({ version: VERSION }));
 
 // Per-IP limit so a public URL can't be hammered. API keys are never stored or logged:
 // they arrive in a request header, are forwarded to the provider, and are discarded.
@@ -59,6 +68,20 @@ app.get("/api/models", async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// Sends one tiny request and reports exactly what the AI service answered, for troubleshooting.
+app.post("/api/test", async (req, res) => {
+  const s = setup(req, res); if (!s) return;
+  const t0 = Date.now();
+  try {
+    const r = await call(s.prov, s.key, s.prov.chat, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: String((req.body || {}).model || s.prov.model), messages: [{ role: "user", content: "Reply with the single word OK." }], [s.prov.tokens]: 20 }),
+    });
+    const body = await r.text();
+    res.json({ status: r.status, reply: textOf(body).trim(), ms: Date.now() - t0, body: body.slice(0, 1200) });
+  } catch (e) { fail(res, e); }
+});
+
 app.post("/api/generate", async (req, res) => {
   const b = req.body || {};
   const ok = Array.isArray(b.messages) && b.messages.length > 0 && b.messages.length <= 20 &&
@@ -73,6 +96,7 @@ app.post("/api/generate", async (req, res) => {
     { json: true, temp: true, tok: prov.tokens },
     { json: false, temp: true, tok: prov.tokens },
     { json: false, temp: false, tok: prov.altTokens },
+    { json: false, temp: false, tok: prov.tokens },
   ];
   try {
     let last;
@@ -82,7 +106,9 @@ app.post("/api/generate", async (req, res) => {
       if (v.json) body.response_format = { type: "json_object" };
       const r = await call(prov, key, prov.chat, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       last = { status: r.status, text: await r.text() };
-      if (r.status !== 400 && r.status !== 422) break;
+      const rejected = r.status === 400 || r.status === 422;
+      const emptyOk = r.status === 200 && !textOf(last.text).trim(); // some settings make a model reply with nothing
+      if (!rejected && !emptyOk) break;
     }
     res.status(last.status).type("application/json").send(last.text);
   } catch (e) { fail(res, e); }
