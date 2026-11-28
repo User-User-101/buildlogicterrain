@@ -48,6 +48,7 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <label for="model">Model</label>
 <div class="row"><input id="model" type="text" list="models" value="openai/gpt-4.1"><button class="alt" id="load" type="button" style="flex:0 0 auto">Load list</button></div>
 <datalist id="models"></datalist>
+<div class="row" style="margin-top:8px"><button class="alt" id="test" type="button">Test connection</button></div>
 <label for="prompt">What should it build?</label>
 <textarea id="prompt" rows="4" placeholder="A small stone castle with two towers and a gate. Or: a steel truss bridge made of beams."></textarea>
 <div class="row"><div><label for="size">Footprint (blocks)</label><input id="size" type="number" min="8" max="128" value="40"></div><div><label for="hmax">Max height</label><input id="hmax" type="number" min="1" max="60" value="15"></div></div>
@@ -55,6 +56,7 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <div class="chk"><input id="hollow" type="checkbox" checked><label for="hollow" style="margin:0">Hollow (skip hidden inner blocks)</label></div>
 <div class="row" style="margin-top:14px"><button id="go" type="button">Generate</button><button class="alt" id="reset" type="button">Start over</button></div>
 <p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to the AI service and is not stored on the server. For GitHub, use a fine-grained token with the Models permission set to read.</p>
+<p class="note" id="ver"></p>
 </section>
 <section class="card" aria-label="Result">
 <canvas id="cv" width="560" height="440" aria-label="Preview of the object"></canvas>
@@ -151,11 +153,12 @@ async function generate(){
   try{
     const messages=[{role:"system",content:system(W,W,H)},...hist,{role:"user",content:prompt}];
     const d=await api("/api/generate",{method:"POST",headers:hdr(),body:JSON.stringify({model:$("model").value.trim(),messages})});
-    const ch=d.choices&&d.choices[0],text=(ch&&ch.message&&typeof ch.message.content==="string"&&ch.message.content)||"",cut=ch&&ch.finish_reason==="length";
-    $("json").textContent=text||"(empty reply)";
+    const ch=d.choices&&d.choices[0],c=ch&&ch.message&&ch.message.content,
+      text=(Array.isArray(c)?c.map(p=>(p&&p.text)||"").join(""):(typeof c==="string"?c:""))||"",cut=ch&&ch.finish_reason==="length";
+    $("json").textContent=text||("(empty reply) Full response from the AI service:\n"+JSON.stringify(d,null,1).slice(0,3000));
     const spec=parseSpec(text);
     if(!spec){$("json").parentElement.open=true;
-      throw new Error(!text?"The model sent an empty reply. Try again or pick another model.":cut?"The reply was cut off before the design finished. Try a smaller footprint or a simpler description.":"The reply was not a usable design. The raw reply is shown under Model output below.")}
+      throw new Error(!text?"The model sent an empty reply"+(ch&&ch.finish_reason?" (finish reason: "+ch.finish_reason+")":"")+". The full response is shown under Model output below. Try another model from the list.":cut?"The reply was cut off before the design finished. Try a smaller footprint or a simpler description.":"The reply was not a usable design. The raw reply is shown under Model output below.")}
     const res=voxelize(spec,W,W,H,40000);
     if(!res.cells.length)throw new Error("The design came out empty. Try again with more detail.");
     hist.push({role:"user",content:prompt},{role:"assistant",content:JSON.stringify(spec)});if(hist.length>8)hist=hist.slice(-8);
@@ -197,6 +200,16 @@ $("load").onclick=async()=>{const key=$("key").value.trim();if(!key)return setSt
     $("models").innerHTML=(Array.isArray(d)?d:(d.data||[])).map(m=>m.id).sort().map(id=>`<option value="${id}">`).join("");setStatus("Model list loaded. Click the Model box to pick one.")}catch(e){setStatus(e.message,1)}};
 $("copy").onclick=async()=>{try{await navigator.clipboard.writeText(OUT)}catch{$("out").select();document.execCommand("copy")}$("copy").textContent="Copied";setTimeout(()=>$("copy").textContent="Copy save string",1500)};
 $("dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([OUT],{type:"text/plain"}));a.download="object-save.txt";a.click()};
+$("test").onclick=async()=>{
+  if(!$("key").value.trim())return setStatus("Enter your key first.",1);
+  setStatus("Testing the connection...");
+  try{const d=await api("/api/test",{method:"POST",headers:hdr(),body:JSON.stringify({model:$("model").value.trim()})});
+    $("json").textContent="HTTP "+d.status+" in "+d.ms+" ms\nReply text: "+JSON.stringify(d.reply)+"\n\nRaw response:\n"+d.body;$("json").parentElement.open=true;
+    const good=d.status===200&&d.reply;
+    setStatus(good?"Connection works. The model replied: "+d.reply:"The AI service answered HTTP "+d.status+(d.status===200?" with no text":"")+". Details are under Model output.",!good)}
+  catch(e){setStatus(e.message,1)}};
+const PAGE_VERSION="r5";
+fetch("/api/version").then(r=>r.json()).then(v=>{$("ver").textContent="Page "+PAGE_VERSION+", server "+v.version+(v.version===PAGE_VERSION?"":" (mismatch: redeploy or hard refresh)")}).catch(()=>{$("ver").textContent="Page "+PAGE_VERSION+", server version unknown"});
 $("prov").onchange=applyProv;applyProv();
 </script>
 </body>
