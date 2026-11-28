@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build Logic object generator</title>
+<style>
+:root{--bg:#eef2f4;--panel:#fff;--ink:#17262f;--mute:#5d707b;--line:#c9d4da;--acc:#1f6f8b;--ok:#2f7d4f;--bad:#b3392f}
+@media (prefers-color-scheme:dark){:root{--bg:#10191e;--panel:#18252c;--ink:#e3ecf0;--mute:#8fa3ad;--line:#2b3d46;--acc:#5fb4d1;--ok:#6cc58f;--bad:#ef8077}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times New Roman",serif}
+main{max-width:1000px;margin:0 auto;padding:28px 18px 60px}
+h1{font-size:1.8rem;margin:0 0 4px}
+p.sub{margin:0 0 22px;color:var(--mute);max-width:62ch}
+{color:var(--acc)}
+.grid{display:grid;grid-template-columns:320px 1fr;gap:20px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px saolid var(--line);border-radius:6px;padding:16px}
+label{display:block;font:14px system-ui,sans-serif;margin:12px 0 2px}
+input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:7px;font:14px system-ui,sans-serif;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px}
+textarea{resize:vertical}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.chk{display:flex;gap:8px;align-items:center;margin-top:10px;font:14px system-ui,sans-serif}.chk input{width:auto}
+button{font:600 14px system-ui,sans-serif;padding:9px 14px;border-radius:4px;border:1px solid var(--acc);background:var(--acc);color:#fff;cursor:pointer}
+button.alt{background:transparent;color:var(--acc)}
+button:disabled{opacity:.55;cursor:wait}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+canvas{width:100%;border:1px solid var(--line);border-radius:4px;background:var(--bg)}
+.stats,#status{font:14px system-ui,sans-serif;color:var(--mute);margin:10px 0 0}
+#status.bad{color:var(--bad)}
+#out{height:100px;font:12px ui-monospace,monospace;margin-top:10px}
+details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;max-height:220px;overflow:auto;background:var(--bg);padding:8px;border-radius:4px}
+.note{font:13px system-ui,sans-serif;color:var(--mute);margin-top:12px}
+</style>
+</head>
+<body>
+<main>
+<p style="margin:0 0 8px;font:14px system-ui,sans-serif"><a href="/">Terrain generator</a> &middot; Object generator</p>
+<h1>Build Logic object generator</h1>
+<p class="sub">Describe something and an AI model on Groq designs it from boxes, beams, spheres and cylinders. The page turns that into a save string. You need your own Groq API key.</p>
+<div class="grid">
+<section class="card" aria-label="Settings">
+<label for="key">Groq API key</label>
+<input id="key" type="password" autocomplete="off" placeholder="gsk_...">
+<div class="chk"><input id="rem" type="checkbox"><label for="rem" style="margin:0">Remember in this browser</label></div>
+<label for="model">Model</label>
+<div class="row"><input id="model" type="text" list="models" value="llama-3.3-70b-versatile"><button class="alt" id="load" type="button" style="flex:0 0 auto">Load list</button></div>
+<datalist id="models"></datalist>
+<label for="prompt">What should it build?</label>
+<textarea id="prompt" rows="4" placeholder="A small stone castle with two towers and a gate. Or: a steel truss bridge made of beams."></textarea>
+<div class="row"><div><label for="size">Footprint (blocks)</label><input id="size" type="number" min="8" max="128" value="40"></div><div><label for="hmax">Max height</label><input id="hmax" type="number" min="1" max="60" value="15"></div></div>
+<div class="row"><div><label for="ox">Place at x</label><input id="ox" type="number" min="0" max="255" value="100"></div><div><label for="oy">Place at y</label><input id="oy" type="number" min="0" max="255" value="100"></div></div>
+<div class="chk"><input id="hollow" type="checkbox" checked><label for="hollow" style="margin:0">Hollow (skip hidden inner blocks)</label></div>
+<div class="row" style="margin-top:14px"><button id="go" type="button">Generate</button><button class="alt" id="reset" type="button">Start over</button></div>
+<p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to Groq and is not stored on the server.</p>
+</section>
+<section class="card" aria-label="Result">
+<canvas id="cv" width="560" height="440" aria-label="Preview of the object"></canvas>
+<div id="status" role="status"></div>
+<div class="stats" id="stats"></div>
+<textarea id="out" readonly aria-label="Save string"></textarea>
+<div class="row" style="margin-top:10px"><button id="copy" type="button">Copy save string</button><button class="alt" id="dl" type="button">Download .txt</button></div>
+<details><summary>Model output (JSON)</summary><pre id="json"></pre></details>
+</section>
+</div>
+</main>
+<script>
+// Same save format as the terrain page: 'G' + 5 chars + 4 color chars (block id 43 only).
+const AL="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$";
+function chars(v,n){let s="";for(let i=0;i<n;i++){s+=AL[v%64];v=Math.floor(v/64)}return s}
+function enc(x,y,h,rgb){return chars(6+x*64+h*16384+y*4194304,6)+chars(rgb[0]+rgb[1]*256+rgb[2]*65536,4)}
+// Block types the generator may use. Add more here once their save format is known (see the reply).
+const BLOCKS={cube:{label:"Standard block (43)",enc}};
+
+function hexColor(c){if(typeof c!=="string")return[150,150,155];let h=c.replace("#","").trim();if(h.length===3)h=[...h].map(x=>x+x).join("");
+  if(!/^[0-9a-fA-F]{6}$/.test(h))return[150,150,155];return[0,2,4].map(i=>parseInt(h.slice(i,i+2),16))}
+const num=v=>Number.isFinite(+v)?Math.round(+v):null;
+
+// Turn the model's shapes into voxels. Pure function, easy to test.
+function voxelize(spec,W,D,H,maxCells){
+  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;let outside=0;
+  const put=(x,y,z,col,air)=>{
+    if(x<0||y<0||z<0||x>=W||y>=D||z>=H){outside++;return}
+    if(air)v.delete(key(x,y,z));else if(v.size<maxCells||v.has(key(x,y,z)))v.set(key(x,y,z),[x,y,z,col])};
+  const parts=Array.isArray(spec&&spec.parts)?spec.parts.slice(0,300):[];
+  for(const p of parts){
+    if(!p||typeof p!=="object")continue;
+    const col=hexColor(p.color),air=!!p.air,s=p.shape;
+    if(s==="box"){const x=num(p.x),y=num(p.y),z=num(p.z),w=num(p.w),d=num(p.d),h=num(p.h);
+      if([x,y,z,w,d,h].some(n=>n===null))continue;
+      for(let i=0;i<Math.min(w,256);i++)for(let j=0;j<Math.min(d,256);j++)for(let k=0;k<Math.min(h,64);k++)put(x+i,y+j,z+k,col,air)}
+    else if(s==="line"&&Array.isArray(p.from)&&Array.isArray(p.to)){
+      const a=p.from.map(num),b=p.to.map(num);if(a.length<3||b.length<3||[...a,...b].some(n=>n===null))continue;
+      const t=Math.max(1,Math.min(3,num(p.thick)||1)),n=Math.max(Math.abs(b[0]-a[0]),Math.abs(b[1]-a[1]),Math.abs(b[2]-a[2]),1);
+      for(let i=0;i<=n;i++){const x=Math.round(a[0]+(b[0]-a[0])*i/n),y=Math.round(a[1]+(b[1]-a[1])*i/n),z=Math.round(a[2]+(b[2]-a[2])*i/n);
+        for(let dx=0;dx<t;dx++)for(let dy=0;dy<t;dy++)for(let dz=0;dz<t;dz++)put(x+dx,y+dy,z+dz,col,air)}}
+    else if(s==="sphere"){const cx=num(p.cx),cy=num(p.cy),cz=num(p.cz),r=[p.rx,p.ry,p.rz].map(num);
+      if([cx,cy,cz,...r].some(n=>n===null)||r.some(n=>n<1))continue;
+      for(let i=-r[0];i<=r[0];i++)for(let j=-r[1];j<=r[1];j++)for(let k=-r[2];k<=r[2];k++)
+        if((i/r[0])**2+(j/r[1])**2+(k/r[2])**2<=1.02)put(cx+i,cy+j,cz+k,col,air)}
+    else if(s==="cylinder"){const cx=num(p.cx),cy=num(p.cy),z=num(p.z),r=num(p.r),h=num(p.h);
+      if([cx,cy,z,r,h].some(n=>n===null)||r<1)continue;
+      for(let i=-r;i<=r;i++)for(let j=-r;j<=r;j++)if(i*i+j*j<=r*r+r*.5)for(let k=0;k<Math.min(h,64);k++)put(cx+i,cy+j,z+k,col,air)}
+  }
+  return{cells:[...v.values()],outside,parts:parts.length};
+}
+function hollowOut(cells){
+  const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
+  return cells.filter(([x,y,z])=>!(has(x+1,y,z)&&has(x-1,y,z)&&has(x,y+1,z)&&has(x,y-1,z)&&has(x,y,z+1)&&has(x,y,z-1)));
+}
+const $=id=>document.getElementById(id);
+function system(W,D,H){return `You design small 3D structures for a voxel building game. Reply with ONE JSON object and nothing else.
+The build area is ${W} blocks wide (x, 0-${W-1}), ${D} deep (y, 0-${D-1}) and ${H} tall (z, 0-${H-1}); z=0 is the ground. Every block is a 1x1x1 cube. Use integer coordinates only and stay inside the area.
+Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later parts overwrite earlier ones. Allowed parts:
+{"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"}  (solid box starting at x,y,z; w=size along x, d=along y, h=along z)
+{"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"}  (a beam or diagonal brace, thick 1-3)
+{"shape":"sphere","cx":0,"cy":0,"cz":0,"rx":3,"ry":3,"rz":3,"color":"#cc5555"}
+{"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}  (vertical, round)
+Add "air":true to any part to carve it out (doors, windows, hollow rooms) instead of adding blocks.
+Prefer few large parts over many small ones. Use realistic colors as hex. Use beams (lines or thin boxes with w=1 and d=1) for frames, trusses, railings and supports. Keep the design well proportioned and sitting on the ground at z=0. If the user asks for a change, return the full updated design.`}
+
+let hist=[],OUT="";
+function setStatus(t,bad){const s=$("status");s.textContent=t;s.className=bad?"bad":""}
+async function api(url,opts){
+  const r=await fetch(url,opts);let d;try{d=await r.json()}catch{d={}}
+  if(!r.ok)throw new Error((d.error&&d.error.message)||("Request failed ("+r.status+")"));return d}
+async function generate(){
+  const key=$("key").value.trim(),prompt=$("prompt").value.trim();
+  if(!key)return setStatus("Enter your Groq API key first.",1);
+  if(!prompt)return setStatus("Describe what to build.",1);
+  const W=Math.min(128,Math.max(8,+$("size").value|0)),H=Math.min(60,Math.max(1,+$("hmax").value|0));
+  if($("rem").checked)localStorage.setItem("groqkey",key);else localStorage.removeItem("groqkey");
+  $("go").disabled=true;setStatus("Asking the model...");
+  try{
+    const messages=[{role:"system",content:system(W,W,H)},...hist,{role:"user",content:prompt}];
+    const d=await api("/api/generate",{method:"POST",headers:{"content-type":"application/json","x-groq-key":key},body:JSON.stringify({model:$("model").value.trim(),messages})});
+    const text=(d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content)||"";
+    let spec;try{spec=JSON.parse(text.replace(/^```(?:json)?|```$/gm,"").trim())}catch{throw new Error("The model did not return valid JSON. Try again or pick another model.")}
+    const res=voxelize(spec,W,W,H,40000);
+    if(!res.cells.length)throw new Error("The design came out empty. Try again with more detail.");
+    hist.push({role:"user",content:prompt},{role:"assistant",content:JSON.stringify(spec)});if(hist.length>8)hist=hist.slice(-8);
+    $("json").textContent=JSON.stringify(spec,null,1);
+    show(res,W,H);setStatus("Done. Type a change and press Generate to refine, or copy the string.");$("prompt").value="";
+  }catch(e){setStatus(e.message,1)}finally{$("go").disabled=false}
+}
+function show(res,W,H){
+  let cells=$("hollow").checked?hollowOut(res.cells):res.cells;
+  let ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0);
+  if(ox+W>256){ox=256-W;$("ox").value=ox}if(oy+W>256){oy=256-W;$("oy").value=oy}
+  OUT=cells.map(c=>BLOCKS.cube.enc(ox+c[0],oy+c[1],c[2],c[3])).join(";");$("out").value=OUT;
+  const top=Math.max(...cells.map(c=>c[2]));
+  $("stats").innerHTML=cells.length.toLocaleString()+" blocks, "+res.parts+" parts, "+OUT.length.toLocaleString()+" characters"+
+    (res.outside?'<br><span style="color:var(--bad)">'+res.outside+" block(s) fell outside the area and were dropped.</span>":"")+
+    (top>15?'<br><span style="color:var(--bad)">Heights above 15 are untested in the game. Use the Height test on the terrain page first.</span>':"");
+  iso(cells,W,H);
+}
+function iso(cells,W,H){ // isometric preview; axes are relative, not necessarily the game's compass directions
+  const cv=$("cv"),g=cv.getContext("2d");g.clearRect(0,0,cv.width,cv.height);
+  const s=Math.max(2,Math.min((cv.width-20)/(W+W),(cv.height-20)/(W+H*1.2)));
+  const P=(x,y,z)=>[cv.width/2+(x-y)*s,cv.height-12-(x+y)*s/2-z*s];
+  const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
+  const sorted=cells.slice().sort((a,b)=>(b[0]+b[1]+b[2])-(a[0]+a[1]+a[2])); // far (large x+y+z) first
+  const shade=(c,f)=>`rgb(${c.slice(0,3).map(v=>Math.round(v*f)).join(",")})`;
+  const poly=(pts,fill)=>{g.beginPath();pts.forEach((p,i)=>i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1]));g.closePath();g.fillStyle=fill;g.fill()};
+  const Q=P;
+  for(const [x,y,z,c] of sorted){ // viewer looks from the -x, -y, +z side
+    if(!has(x,y,z+1))poly([Q(x,y,z+1),Q(x+1,y,z+1),Q(x+1,y+1,z+1),Q(x,y+1,z+1)],shade(c,1));
+    if(!has(x-1,y,z))poly([Q(x,y,z+1),Q(x,y+1,z+1),Q(x,y+1,z),Q(x,y,z)],shade(c,.8));
+    if(!has(x,y-1,z))poly([Q(x,y,z+1),Q(x+1,y,z+1),Q(x+1,y,z),Q(x,y,z)],shade(c,.62));
+  }
+}
+$("go").onclick=generate;
+$("reset").onclick=()=>{hist=[];$("prompt").value="";$("out").value="";OUT="";$("stats").textContent="";$("json").textContent="";
+  const cv=$("cv");cv.getContext("2d").clearRect(0,0,cv.width,cv.height);setStatus("Started over.")};
+$("load").onclick=async()=>{const key=$("key").value.trim();if(!key)return setStatus("Enter your key to load the model list.",1);
+  try{const d=await api("/api/models",{headers:{"x-groq-key":key}});
+    $("models").innerHTML=(d.data||[]).map(m=>m.id).sort().map(id=>`<option value="${id}">`).join("");setStatus("Model list loaded. Click the Model box to pick one.")}catch(e){setStatus(e.message,1)}};
+$("copy").onclick=async()=>{try{await navigator.clipboard.writeText(OUT)}catch{$("out").select();document.execCommand("copy")}$("copy").textContent="Copied";setTimeout(()=>$("copy").textContent="Copy save string",1500)};
+$("dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([OUT],{type:"text/plain"}));a.download="object-save.txt";a.click()};
+$("key").value=localStorage.getItem("groqkey")||"";if($("key").value)$("rem").checked=true;
+</script>
+</body>
+</html>
