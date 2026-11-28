@@ -12,10 +12,10 @@ body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Georgia,"Times
 main{max-width:1000px;margin:0 auto;padding:28px 18px 60px}
 h1{font-size:1.8rem;margin:0 0 4px}
 p.sub{margin:0 0 22px;color:var(--mute);max-width:62ch}
-{color:var(--acc)}
+a{color:var(--acc)}
 .grid{display:grid;grid-template-columns:320px 1fr;gap:20px}
 @media(max-width:760px){.grid{grid-template-columns:1fr}}
-.card{background:var(--panel);border:1px saolid var(--line);border-radius:6px;padding:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:16px}
 label{display:block;font:14px system-ui,sans-serif;margin:12px 0 2px}
 input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:7px;font:14px system-ui,sans-serif;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:4px}
 textarea{resize:vertical}
@@ -37,14 +37,16 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <main>
 <p style="margin:0 0 8px;font:14px system-ui,sans-serif"><a href="/">Terrain generator</a> &middot; Object generator</p>
 <h1>Build Logic object generator</h1>
-<p class="sub">Describe something and an AI model on Groq designs it from boxes, beams, spheres and cylinders. The page turns that into a save string. You need your own Groq API key.</p>
+<p class="sub">Describe something and an AI model designs it from boxes, beams, spheres and cylinders, and the page turns that into a save string. It works with a GitHub token (GitHub Models) or a Groq API key.</p>
 <div class="grid">
 <section class="card" aria-label="Settings">
-<label for="key">Groq API key</label>
-<input id="key" type="password" autocomplete="off" placeholder="gsk_...">
+<label for="prov">AI service</label>
+<select id="prov"><option value="github">GitHub Models (GitHub token)</option><option value="groq">Groq (Groq API key)</option></select>
+<label for="key" id="keylabel">GitHub token</label>
+<input id="key" type="password" autocomplete="off" placeholder="github_pat_...">
 <div class="chk"><input id="rem" type="checkbox"><label for="rem" style="margin:0">Remember in this browser</label></div>
 <label for="model">Model</label>
-<div class="row"><input id="model" type="text" list="models" value="llama-3.3-70b-versatile"><button class="alt" id="load" type="button" style="flex:0 0 auto">Load list</button></div>
+<div class="row"><input id="model" type="text" list="models" value="openai/gpt-4.1"><button class="alt" id="load" type="button" style="flex:0 0 auto">Load list</button></div>
 <datalist id="models"></datalist>
 <label for="prompt">What should it build?</label>
 <textarea id="prompt" rows="4" placeholder="A small stone castle with two towers and a gate. Or: a steel truss bridge made of beams."></textarea>
@@ -52,7 +54,7 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <div class="row"><div><label for="ox">Place at x</label><input id="ox" type="number" min="0" max="255" value="100"></div><div><label for="oy">Place at y</label><input id="oy" type="number" min="0" max="255" value="100"></div></div>
 <div class="chk"><input id="hollow" type="checkbox" checked><label for="hollow" style="margin:0">Hollow (skip hidden inner blocks)</label></div>
 <div class="row" style="margin-top:14px"><button id="go" type="button">Generate</button><button class="alt" id="reset" type="button">Start over</button></div>
-<p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to Groq and is not stored on the server.</p>
+<p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to the AI service and is not stored on the server. For GitHub, use a fine-grained token with the Models permission set to read.</p>
 </section>
 <section class="card" aria-label="Result">
 <canvas id="cv" width="560" height="440" aria-label="Preview of the object"></canvas>
@@ -119,6 +121,11 @@ Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later p
 Add "air":true to any part to carve it out (doors, windows, hollow rooms) instead of adding blocks.
 Prefer few large parts over many small ones. Use realistic colors as hex. Use beams (lines or thin boxes with w=1 and d=1) for frames, trusses, railings and supports. Keep the design well proportioned and sitting on the ground at z=0. If the user asks for a change, return the full updated design.`}
 
+const PROV={github:{label:"GitHub token",ph:"github_pat_...",model:"openai/gpt-4.1"},groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"}};
+const savedKey=p=>localStorage.getItem("key_"+p)||"";
+function applyProv(){const p=$("prov").value;$("keylabel").textContent=PROV[p].label;$("key").placeholder=PROV[p].ph;$("model").value=PROV[p].model;
+  $("key").value=savedKey(p);$("rem").checked=!!$("key").value;$("models").innerHTML=""}
+const hdr=()=>({"content-type":"application/json","x-ai-key":$("key").value.trim(),"x-provider":$("prov").value});
 let hist=[],OUT="";
 function setStatus(t,bad){const s=$("status");s.textContent=t;s.className=bad?"bad":""}
 async function api(url,opts){
@@ -126,14 +133,14 @@ async function api(url,opts){
   if(!r.ok)throw new Error((d.error&&d.error.message)||("Request failed ("+r.status+")"));return d}
 async function generate(){
   const key=$("key").value.trim(),prompt=$("prompt").value.trim();
-  if(!key)return setStatus("Enter your Groq API key first.",1);
+  if(!key)return setStatus("Enter your "+PROV[$("prov").value].label+" first.",1);
   if(!prompt)return setStatus("Describe what to build.",1);
   const W=Math.min(128,Math.max(8,+$("size").value|0)),H=Math.min(60,Math.max(1,+$("hmax").value|0));
-  if($("rem").checked)localStorage.setItem("groqkey",key);else localStorage.removeItem("groqkey");
+  if($("rem").checked)localStorage.setItem("key_"+$("prov").value,key);else localStorage.removeItem("key_"+$("prov").value);
   $("go").disabled=true;setStatus("Asking the model...");
   try{
     const messages=[{role:"system",content:system(W,W,H)},...hist,{role:"user",content:prompt}];
-    const d=await api("/api/generate",{method:"POST",headers:{"content-type":"application/json","x-groq-key":key},body:JSON.stringify({model:$("model").value.trim(),messages})});
+    const d=await api("/api/generate",{method:"POST",headers:hdr(),body:JSON.stringify({model:$("model").value.trim(),messages})});
     const text=(d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content)||"";
     let spec;try{spec=JSON.parse(text.replace(/^```(?:json)?|```$/gm,"").trim())}catch{throw new Error("The model did not return valid JSON. Try again or pick another model.")}
     const res=voxelize(spec,W,W,H,40000);
@@ -173,11 +180,11 @@ $("go").onclick=generate;
 $("reset").onclick=()=>{hist=[];$("prompt").value="";$("out").value="";OUT="";$("stats").textContent="";$("json").textContent="";
   const cv=$("cv");cv.getContext("2d").clearRect(0,0,cv.width,cv.height);setStatus("Started over.")};
 $("load").onclick=async()=>{const key=$("key").value.trim();if(!key)return setStatus("Enter your key to load the model list.",1);
-  try{const d=await api("/api/models",{headers:{"x-groq-key":key}});
-    $("models").innerHTML=(d.data||[]).map(m=>m.id).sort().map(id=>`<option value="${id}">`).join("");setStatus("Model list loaded. Click the Model box to pick one.")}catch(e){setStatus(e.message,1)}};
+  try{const d=await api("/api/models",{headers:hdr()});
+    $("models").innerHTML=(Array.isArray(d)?d:(d.data||[])).map(m=>m.id).sort().map(id=>`<option value="${id}">`).join("");setStatus("Model list loaded. Click the Model box to pick one.")}catch(e){setStatus(e.message,1)}};
 $("copy").onclick=async()=>{try{await navigator.clipboard.writeText(OUT)}catch{$("out").select();document.execCommand("copy")}$("copy").textContent="Copied";setTimeout(()=>$("copy").textContent="Copy save string",1500)};
 $("dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([OUT],{type:"text/plain"}));a.download="object-save.txt";a.click()};
-$("key").value=localStorage.getItem("groqkey")||"";if($("key").value)$("rem").checked=true;
+$("prov").onchange=applyProv;applyProv();
 </script>
 </body>
 </html>
