@@ -110,6 +110,16 @@ function hollowOut(cells){
   const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
   return cells.filter(([x,y,z])=>!(has(x+1,y,z)&&has(x-1,y,z)&&has(x,y+1,z)&&has(x,y-1,z)&&has(x,y,z+1)&&has(x,y,z-1)));
 }
+// Pull a design out of the model's reply even if it has text around it, code fences, or was cut off mid-way.
+function parseSpec(text){
+  const a=text.indexOf("{");if(a<0)return null;
+  const s=text.slice(a);
+  try{const o=JSON.parse(s.slice(0,s.lastIndexOf("}")+1));if(o&&Array.isArray(o.parts))return o}catch{}
+  let i=s.length; // cut off: keep every complete part
+  for(let n=0;n<600;n++){i=s.lastIndexOf("}",i-1);if(i<0)break;
+    for(const tail of ["]}","}"]){try{const o=JSON.parse(s.slice(0,i+1)+tail);if(o&&Array.isArray(o.parts))return o}catch{}}}
+  return null;
+}
 const $=id=>document.getElementById(id);
 function system(W,D,H){return `You design small 3D structures for a voxel building game. Reply with ONE JSON object and nothing else.
 The build area is ${W} blocks wide (x, 0-${W-1}), ${D} deep (y, 0-${D-1}) and ${H} tall (z, 0-${H-1}); z=0 is the ground. Every block is a 1x1x1 cube. Use integer coordinates only and stay inside the area.
@@ -119,7 +129,7 @@ Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later p
 {"shape":"sphere","cx":0,"cy":0,"cz":0,"rx":3,"ry":3,"rz":3,"color":"#cc5555"}
 {"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}  (vertical, round)
 Add "air":true to any part to carve it out (doors, windows, hollow rooms) instead of adding blocks.
-Prefer few large parts over many small ones. Use realistic colors as hex. Use beams (lines or thin boxes with w=1 and d=1) for frames, trusses, railings and supports. Keep the design well proportioned and sitting on the ground at z=0. If the user asks for a change, return the full updated design.`}
+Prefer few large parts over many small ones. Use realistic colors as hex. Use beams (lines or thin boxes with w=1 and d=1) for frames, trusses, railings and supports. Keep the design well proportioned and sitting on the ground at z=0. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
 
 const PROV={github:{label:"GitHub token",ph:"github_pat_...",model:"openai/gpt-4.1"},groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"}};
 const savedKey=p=>localStorage.getItem("key_"+p)||"";
@@ -141,13 +151,16 @@ async function generate(){
   try{
     const messages=[{role:"system",content:system(W,W,H)},...hist,{role:"user",content:prompt}];
     const d=await api("/api/generate",{method:"POST",headers:hdr(),body:JSON.stringify({model:$("model").value.trim(),messages})});
-    const text=(d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content)||"";
-    let spec;try{spec=JSON.parse(text.replace(/^```(?:json)?|```$/gm,"").trim())}catch{throw new Error("The model did not return valid JSON. Try again or pick another model.")}
+    const ch=d.choices&&d.choices[0],text=(ch&&ch.message&&typeof ch.message.content==="string"&&ch.message.content)||"",cut=ch&&ch.finish_reason==="length";
+    $("json").textContent=text||"(empty reply)";
+    const spec=parseSpec(text);
+    if(!spec){$("json").parentElement.open=true;
+      throw new Error(!text?"The model sent an empty reply. Try again or pick another model.":cut?"The reply was cut off before the design finished. Try a smaller footprint or a simpler description.":"The reply was not a usable design. The raw reply is shown under Model output below.")}
     const res=voxelize(spec,W,W,H,40000);
     if(!res.cells.length)throw new Error("The design came out empty. Try again with more detail.");
     hist.push({role:"user",content:prompt},{role:"assistant",content:JSON.stringify(spec)});if(hist.length>8)hist=hist.slice(-8);
     $("json").textContent=JSON.stringify(spec,null,1);
-    show(res,W,H);setStatus("Done. Type a change and press Generate to refine, or copy the string.");$("prompt").value="";
+    show(res,W,H);setStatus(cut?"The reply was cut off, so only the complete parts were used. Type a change to refine, or try a smaller footprint.":"Done. Type a change and press Generate to refine, or copy the string.");$("prompt").value="";
   }catch(e){setStatus(e.message,1)}finally{$("go").disabled=false}
 }
 function show(res,W,H){
