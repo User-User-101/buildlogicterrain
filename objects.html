@@ -37,16 +37,16 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <main>
 <p style="margin:0 0 8px;font:14px system-ui,sans-serif"><a href="/">Terrain generator</a> &middot; Object generator</p>
 <h1>Build Logic object generator</h1>
-<p class="sub">Describe something and an AI model designs it from boxes, beams, spheres and cylinders, and the page turns that into a save string. It works with a GitHub token (GitHub Models) or a Groq API key.</p>
+<p class="sub">Describe something and an AI model designs it from boxes, beams, spheres and cylinders, and the page turns that into a save string. It works with a free Groq or OpenRouter API key.</p>
 <div class="grid">
 <section class="card" aria-label="Settings">
 <label for="prov">AI service</label>
-<select id="prov"><option value="github">GitHub Models (GitHub token)</option><option value="groq">Groq (Groq API key)</option></select>
-<label for="key" id="keylabel">GitHub token</label>
-<input id="key" type="password" autocomplete="off" placeholder="github_pat_...">
+<select id="prov"><option value="groq">Groq (Groq API key)</option><option value="openrouter">OpenRouter (OpenRouter API key)</option></select>
+<label for="key" id="keylabel">Groq API key</label>
+<input id="key" type="password" autocomplete="off" placeholder="gsk_...">
 <div class="chk"><input id="rem" type="checkbox"><label for="rem" style="margin:0">Remember in this browser</label></div>
 <label for="model">Model</label>
-<div class="row"><input id="model" type="text" list="models" value="openai/gpt-4.1"><button class="alt" id="load" type="button" style="flex:0 0 auto">Load list</button></div>
+<div class="row"><input id="model" type="text" list="models" value="llama-3.3-70b-versatile"><button class="alt" id="load" type="button" style="flex:0 0 auto">Load list</button></div>
 <datalist id="models"></datalist>
 <div class="row" style="margin-top:8px"><button class="alt" id="test" type="button">Test connection</button></div>
 <label for="prompt">What should it build?</label>
@@ -55,7 +55,7 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <div class="row"><div><label for="ox">Place at x</label><input id="ox" type="number" min="0" max="255" value="100"></div><div><label for="oy">Place at y</label><input id="oy" type="number" min="0" max="255" value="100"></div></div>
 <div class="chk"><input id="hollow" type="checkbox" checked><label for="hollow" style="margin:0">Hollow (skip hidden inner blocks)</label></div>
 <div class="row" style="margin-top:14px"><button id="go" type="button">Generate</button><button class="alt" id="reset" type="button">Start over</button></div>
-<p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to the AI service and is not stored on the server. For GitHub, use a fine-grained token with the Models permission set to read.</p>
+<p class="note">After a result, type a change (like "make the towers taller") and press Generate to refine it. Your key is passed through this site's server to the AI service and is not stored on the server. Get a free key at console.groq.com or openrouter.ai.</p>
 <p class="note" id="ver"></p>
 </section>
 <section class="card" aria-label="Result">
@@ -133,7 +133,7 @@ Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later p
 Add "air":true to any part to carve it out (doors, windows, hollow rooms) instead of adding blocks.
 Prefer few large parts over many small ones. Use realistic colors as hex. Use beams (lines or thin boxes with w=1 and d=1) for frames, trusses, railings and supports. Keep the design well proportioned and sitting on the ground at z=0. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
 
-const PROV={github:{label:"GitHub token",ph:"github_pat_...",model:"openai/gpt-4.1"},groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"}};
+const PROV={groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"},openrouter:{label:"OpenRouter API key",ph:"sk-or-...",model:"openrouter/free"}};
 const savedKey=p=>localStorage.getItem("key_"+p)||"";
 function applyProv(){const p=$("prov").value;$("keylabel").textContent=PROV[p].label;$("key").placeholder=PROV[p].ph;$("model").value=PROV[p].model;
   $("key").value=savedKey(p);$("rem").checked=!!$("key").value;$("models").innerHTML=""}
@@ -209,7 +209,7 @@ $("test").onclick=async()=>{
     const good=d.status===200&&d.reply;
     setStatus(good?"Connection works. The model replied: "+d.reply:"The AI service answered HTTP "+d.status+(d.status===200?" with no text":"")+". Details are under Model output.",!good)}
   catch(e){setStatus(e.message,1)}};
-const PAGE_VERSION="r6";
+const PAGE_VERSION="r7";
 fetch("/api/version").then(r=>r.json()).then(v=>{$("ver").textContent="Page "+PAGE_VERSION+", server "+v.version+(v.version===PAGE_VERSION?"":" (mismatch: redeploy or hard refresh)")}).catch(()=>{$("ver").textContent="Page "+PAGE_VERSION+", server version unknown"});
 $("prov").onchange=applyProv;applyProv();
 </script>
