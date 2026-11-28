@@ -22,13 +22,31 @@ const PROVIDERS = {
   },
 };
 
-const VERSION = "r5";
+const VERSION = "r6";
 const textOf = (raw) => {
   try {
     const c = JSON.parse(raw).choices[0].message.content;
     return Array.isArray(c) ? c.map((p) => (p && p.text) || "").join("") : c || "";
   } catch { return ""; }
 };
+
+// True only for the normal API wrapper ({"choices":[...]}), not for any JSON the model itself wrote.
+const isJson = (t) => { try { const o = JSON.parse(t); return !!o && (Array.isArray(o.choices) || !!o.error); } catch { return false; } };
+// Some responses arrive as the model's plain text instead of the usual JSON wrapper. Wrap them so the page can read them.
+const wrap = (t) => JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: t } }] });
+async function chat(prov, key, body) {
+  const send = (p) => call(p, key, p.chat, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  let r = await send(prov);
+  let text = await r.text();
+  if (r.status === 200 && !isJson(text) && prov.headers.Accept) { // try again asking for plain JSON
+    const r2 = await send({ ...prov, headers: { ...prov.headers, Accept: "application/json" } });
+    const t2 = await r2.text();
+    if (r2.status === 200 && isJson(t2)) return { status: 200, text: t2 };
+    if (r2.status === 200 && t2.trim()) text = t2;
+  }
+  if (r.status === 200 && !isJson(text)) text = wrap(text);
+  return { status: r.status, text };
+}
 
 const page = (name) => (_req, res) => {
   const f = path.join(__dirname, name);
@@ -73,12 +91,9 @@ app.post("/api/test", async (req, res) => {
   const s = setup(req, res); if (!s) return;
   const t0 = Date.now();
   try {
-    const r = await call(s.prov, s.key, s.prov.chat, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: String((req.body || {}).model || s.prov.model), messages: [{ role: "user", content: "Reply with the single word OK." }], [s.prov.tokens]: 20 }),
-    });
-    const body = await r.text();
-    res.json({ status: r.status, reply: textOf(body).trim(), ms: Date.now() - t0, body: body.slice(0, 1200) });
+    const body = { model: String((req.body || {}).model || s.prov.model), messages: [{ role: "user", content: "Reply with the single word OK." }], [s.prov.tokens]: 20 };
+    const r = await chat(s.prov, s.key, body);
+    res.json({ status: r.status, reply: textOf(r.text).trim(), ms: Date.now() - t0, body: r.text.slice(0, 1200) });
   } catch (e) { fail(res, e); }
 });
 
@@ -104,10 +119,9 @@ app.post("/api/generate", async (req, res) => {
       const body = { model, messages, [v.tok]: prov.limit };
       if (v.temp) body.temperature = 0.3;
       if (v.json) body.response_format = { type: "json_object" };
-      const r = await call(prov, key, prov.chat, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      last = { status: r.status, text: await r.text() };
-      const rejected = r.status === 400 || r.status === 422;
-      const emptyOk = r.status === 200 && !textOf(last.text).trim(); // some settings make a model reply with nothing
+      last = await chat(prov, key, body);
+      const rejected = last.status === 400 || last.status === 422;
+      const emptyOk = last.status === 200 && !textOf(last.text).trim(); // some settings make a model reply with nothing
       if (!rejected && !emptyOk) break;
     }
     res.status(last.status).type("application/json").send(last.text);
