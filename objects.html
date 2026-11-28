@@ -37,7 +37,7 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 <main>
 <p style="margin:0 0 8px;font:14px system-ui,sans-serif"><a href="/">Terrain generator</a> &middot; Object generator</p>
 <h1>Build Logic object generator</h1>
-<p class="sub">Describe something and an AI model designs it from boxes, beams, spheres and cylinders, and the page turns that into a save string. It works with a free Groq or OpenRouter API key.</p>
+<p class="sub">Describe something and an AI model designs it from ordinary blocks plus Build Logic furniture, signs, doors, panes, poles and other special blocks. The page turns the design into a Build Logic save string.</p>
 <div class="grid">
 <section class="card" aria-label="Settings">
 <label for="prov">AI service</label>
@@ -69,28 +69,84 @@ details{font:13px system-ui,sans-serif;margin-top:12px}pre{white-space:pre-wrap;
 </div>
 </main>
 <script>
-// Same save format as the terrain page: 'G' + 5 chars + 4 color chars (block id 43 only).
+// Build Logic save format: encoded block name + encoded position (4 BL64 chars)
+// + rotation (1 BL64 char) + optional color (4 BL64 chars) + optional /value.
+// The block-name codes and vec3/rotation packing follow the reverse-engineered
+// Build Logic format documented at https://github.com/I-OCode/bl.
 const AL="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789#$";
-function chars(v,n){let s="";for(let i=0;i<n;i++){s+=AL[v%64];v=Math.floor(v/64)}return s}
-function enc(x,y,h,rgb){return chars(6+x*64+h*16384+y*4194304,6)+chars(rgb[0]+rgb[1]*256+rgb[2]*65536,4)}
-// Block types the generator may use. Add more here once their save format is known (see the reply).
-const BLOCKS={cube:{label:"Standard block (43)",enc}};
+function enc64(v){if(!Number.isInteger(v)||v<0||v>63)throw new RangeError("BL64 value must be from 0 to 63");return AL[v]}
+function encVec3(v){
+  const [x,y,z]=v.map(n=>Math.max(0,Math.min(255,Math.round(n))));
+  return [x%64,Math.floor(x/64)+(y*4)%64,Math.floor(y/16)+(z*16)%64,Math.floor(z/4)].map(enc64).join("");
+}
+function normalRotation(r,fallback){
+  if(Array.isArray(r)&&r.length>=3&&r.slice(0,3).every(n=>Number.isFinite(+n)))return r.slice(0,3).map(n=>((Math.round(+n)%4)+4)%4);
+  if(Number.isInteger(r)&&r>=0&&r<=63)return [r%4,Math.floor(r/4)%4,Math.floor(r/16)%4];
+  if(typeof r==="string"&&r.length===1){const n=AL.indexOf(r);if(n>=0)return [n%4,Math.floor(n/4)%4,Math.floor(n/16)%4]}
+  return fallback.slice();
+}
+function encRotation(r){return enc64(r[0]+r[1]*4+r[2]*16)}
+function encodeValue(v){return String(v).replace(/;/g,"\u037E").replace(/([=^])/g,"/$1")}
+
+// Encoded block names come from Build Logic's block-name table. Rotations are
+// quarter-turn values [x,y,z], each 0-3. The type can also be given a custom
+// rotation in the model's JSON so every listed block can be oriented.
+const BLOCKS={
+  "Block":{code:"G",rotation:[0,0,0]},
+  "Chair":{code:",",rotation:[0,1,0]},
+  "Door":{code:"+",rotation:[0,1,0]},
+  "Empty Block":{code:"{",rotation:[0,0,0]},
+  "Pane":{code:":",rotation:[0,0,0]},
+  "Corner Pane":{code:"/",rotation:[0,0,0]},
+  "3 Sides Pole":{code:"#p",rotation:[0,1,0]},
+  "4 Sides Pole":{code:"#1",rotation:[0,1,0]},
+  "4 Sides Pole 2":{code:"#k",rotation:[0,2,0]},
+  "5 Sides Pole":{code:"#2",rotation:[0,3,2]},
+  "6 Sides Pole":{code:"#3",rotation:[0,3,2]},
+  "Corner Pole":{code:"#m",rotation:[0,2,0]},
+  "Pole":{code:"#n",rotation:[0,3,0]},
+  "T Pole":{code:"#o",rotation:[0,3,3]},
+  "Plate":{code:"Q",rotation:[0,1,0]},
+  "Slab":{code:"L",rotation:[0,1,0]},
+  "Sign":{code:"t",rotation:[0,0,0]},
+  "Sign 1x2":{code:"#]",rotation:[0,0,0]},
+  "Slab Chair":{code:"#(",rotation:[0,2,0]},
+  "Solid Chair":{code:"#-",rotation:[0,1,0]},
+  "Stair Chair":{code:"#|",rotation:[0,3,0]},
+  "Stair":{code:"H",rotation:[0,0,0]},
+  "Torch":{code:"J",rotation:[0,1,0]},
+  "Trap Door":{code:"#D",rotation:[0,1,0]}
+};
+function encodeBuildLogicBlock(type,x,y,z,rgb,rotation,value){
+  const def=BLOCKS[type]||BLOCKS.Block;
+  const rot=normalRotation(rotation,def.rotation);
+  return def.code+encVec3([x,y,z])+encRotation(rot)+encVec3(rgb)+(value?"/"+encodeValue(value):"");
+}
 
 function hexColor(c){if(typeof c!=="string")return[150,150,155];let h=c.replace("#","").trim();if(h.length===3)h=[...h].map(x=>x+x).join("");
   if(!/^[0-9a-fA-F]{6}$/.test(h))return[150,150,155];return[0,2,4].map(i=>parseInt(h.slice(i,i+2),16))}
 const num=v=>Number.isFinite(+v)?Math.round(+v):null;
 
-// Turn the model's shapes into voxels. Pure function, easy to test.
+// Turn the model's parts into ordinary voxels and single special blocks.
+// Cell layout: [x,y,z,color,blockType,rotation,textValue].
 function voxelize(spec,W,D,H,maxCells){
-  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;let outside=0;
-  const put=(x,y,z,col,air)=>{
+  const v=new Map(),key=(x,y,z)=>(x*256+y)*64+z;let outside=0;const unknownBlocks=new Set();
+  const put=(x,y,z,col,air,blockType="Block",rotation=null,value="")=>{
     if(x<0||y<0||z<0||x>=W||y>=D||z>=H){outside++;return}
-    if(air)v.delete(key(x,y,z));else if(v.size<maxCells||v.has(key(x,y,z)))v.set(key(x,y,z),[x,y,z,col])};
+    if(air)v.delete(key(x,y,z));
+    else if(v.size<maxCells||v.has(key(x,y,z)))v.set(key(x,y,z),[x,y,z,col,blockType,rotation,value])};
   const parts=Array.isArray(spec&&spec.parts)?spec.parts.slice(0,300):[];
   for(const p of parts){
     if(!p||typeof p!=="object")continue;
     const col=hexColor(p.color),air=!!p.air,s=p.shape;
-    if(s==="box"){const x=num(p.x),y=num(p.y),z=num(p.z),w=num(p.w),d=num(p.d),h=num(p.h);
+    if(s==="block"){
+      const x=num(p.x),y=num(p.y),z=num(p.z),type=String(p.type||p.block||"Block");
+      if([x,y,z].some(n=>n===null))continue;
+      if(!BLOCKS[type]){unknownBlocks.add(type);continue}
+      const rot=normalRotation(p.rotation,BLOCKS[type].rotation),value=typeof p.text==="string"?p.text:"";
+      put(x,y,z,col,false,type,rot,value);
+    }
+    else if(s==="box"){const x=num(p.x),y=num(p.y),z=num(p.z),w=num(p.w),d=num(p.d),h=num(p.h);
       if([x,y,z,w,d,h].some(n=>n===null))continue;
       for(let i=0;i<Math.min(w,256);i++)for(let j=0;j<Math.min(d,256);j++)for(let k=0;k<Math.min(h,64);k++)put(x+i,y+j,z+k,col,air)}
     else if(s==="line"&&Array.isArray(p.from)&&Array.isArray(p.to)){
@@ -106,11 +162,11 @@ function voxelize(spec,W,D,H,maxCells){
       if([cx,cy,z,r,h].some(n=>n===null)||r<1)continue;
       for(let i=-r;i<=r;i++)for(let j=-r;j<=r;j++)if(i*i+j*j<=r*r+r*.5)for(let k=0;k<Math.min(h,64);k++)put(cx+i,cy+j,z+k,col,air)}
   }
-  return{cells:[...v.values()],outside,parts:parts.length};
+  return{cells:[...v.values()],outside,parts:parts.length,unknownBlocks:[...unknownBlocks]};
 }
 function hollowOut(cells){
   const set=new Set(cells.map(c=>(c[0]*256+c[1])*64+c[2])),has=(x,y,z)=>set.has((x*256+y)*64+z);
-  return cells.filter(([x,y,z])=>!(has(x+1,y,z)&&has(x-1,y,z)&&has(x,y+1,z)&&has(x,y-1,z)&&has(x,y,z+1)&&has(x,y,z-1)));
+  return cells.filter(([x,y,z,,type])=>type!=="Block"||!(has(x+1,y,z)&&has(x-1,y,z)&&has(x,y+1,z)&&has(x,y-1,z)&&has(x,y,z+1)&&has(x,y,z-1)));
 }
 // Pull a design out of the model's reply even if it has text around it, code fences, or was cut off mid-way.
 function parseSpec(text){
@@ -123,15 +179,19 @@ function parseSpec(text){
   return null;
 }
 const $=id=>document.getElementById(id);
-function system(W,D,H){return `You design small 3D structures for a voxel building game. Reply with ONE JSON object and nothing else.
-The build area is ${W} blocks wide (x, 0-${W-1}), ${D} deep (y, 0-${D-1}) and ${H} tall (z, 0-${H-1}); z=0 is the ground. Every block is a 1x1x1 cube. Use integer coordinates only and stay inside the area.
+function system(W,D,H){return `You design small 3D structures for Build Logic, a voxel building game. Reply with ONE JSON object and nothing else.
+The build area is ${W} blocks wide (x, 0-${W-1}), ${D} deep (y, 0-${D-1}) and ${H} tall (z, 0-${H-1}); z=0 is the ground. Use integer coordinates only and stay inside the area.
 Format: {"name":"short name","parts":[ ... ]}. Parts are drawn in order; later parts overwrite earlier ones. Allowed parts:
-{"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"}  (solid box starting at x,y,z; w=size along x, d=along y, h=along z)
-{"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"}  (a beam or diagonal brace, thick 1-3)
+{"shape":"box","x":0,"y":0,"z":0,"w":4,"d":4,"h":3,"color":"#8a8a8a"} (solid box of ordinary Block cubes; w=x size, d=y size, h=z size)
+{"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"} (ordinary Block beam made from cubes, thick 1-3)
 {"shape":"sphere","cx":0,"cy":0,"cz":0,"rx":3,"ry":3,"rz":3,"color":"#cc5555"}
-{"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}  (vertical, round)
-Add "air":true to any part to carve it out (doors, windows, hollow rooms) instead of adding blocks.
-Prefer few large parts over many small ones. Use realistic colors as hex. Use beams (lines or thin boxes with w=1 and d=1) for frames, trusses, railings and supports. Keep the design well proportioned and sitting on the ground at z=0. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
+{"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}
+{"shape":"block","type":"Chair","x":2,"y":2,"z":0,"rotation":[0,1,0],"color":"#cc5555"} (one special Build Logic block at one grid position; rotation is optional)
+Special block type values: ${Object.keys(BLOCKS).filter(k=>k!=="Block").join(", ")}.
+The block type's default rotation is used when rotation is omitted. A rotation is [rx,ry,rz], each an integer from 0 to 3 (quarter-turn steps). Use the rotation field to make rotated versions; rotations from the supplied Build Logic examples include Chair [0,0,0], Door [0,0,0], Sign [0,1,0], Sign 1x2 [0,1,0], Slab Chair [0,1,0], Solid Chair [0,0,0], Stair Chair [0,2,0], Trap Door [0,2,0], Corner Pane [0,2,0], Pane [0,1,0], Plate [0,3,1], Slab [0,1,1], 3 Sides Pole [0,0,0], 4 Sides Pole [0,2,0], Corner Pole [0,3,0], Pole [0,3,3], and T Pole [0,0,3]. 4 Sides Pole 2 and 5 Sides Pole also support custom rotations even though the sample export did not include their rotated versions. Do not create a separate rotated 6 Sides Pole variant; use its supplied orientation only.
+For signs, optionally add "text":"Hello" to the block part. Colors are hex strings. Add "air":true to box/line/sphere/cylinder parts to carve out space instead of adding blocks.
+Use special blocks when appropriate for chairs, doors, signs, stairs, panes, poles, plates and slabs; use ordinary Block cubes for general structure. Special blocks occupy one grid position in the save data. The preview approximates each special block as a cube.
+Prefer few large parts over many small ones. Keep the design well proportioned and sitting on the ground at z=0. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
 
 const PROV={groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"},openrouter:{label:"OpenRouter API key",ph:"sk-or-...",model:"openrouter/free"}};
 const savedKey=p=>localStorage.getItem("key_"+p)||"";
@@ -171,9 +231,10 @@ function show(res,W,H){
   let cells=$("hollow").checked?hollowOut(res.cells):res.cells;
   let ox=Math.max(0,+$("ox").value|0),oy=Math.max(0,+$("oy").value|0);
   if(ox+W>256){ox=256-W;$("ox").value=ox}if(oy+W>256){oy=256-W;$("oy").value=oy}
-  OUT=cells.map(c=>BLOCKS.cube.enc(ox+c[0],oy+c[1],c[2],c[3])).join(";");$("out").value=OUT;
-  const top=Math.max(...cells.map(c=>c[2]));
-  $("stats").innerHTML=cells.length.toLocaleString()+" blocks, "+res.parts+" parts, "+OUT.length.toLocaleString()+" characters"+
+  OUT=cells.map(c=>encodeBuildLogicBlock(c[4]||"Block",ox+c[0],oy+c[1],c[2],c[3],c[5],c[6])).join(";");$("out").value=OUT;
+  const top=Math.max(...cells.map(c=>c[2])),special=cells.filter(c=>c[4]&&c[4]!=="Block").length;
+  $("stats").innerHTML=cells.length.toLocaleString()+" blocks ("+special+" special), "+res.parts+" parts, "+OUT.length.toLocaleString()+" characters"+
+    (res.unknownBlocks.length?'<br><span style="color:var(--bad)">Unknown special block type(s) skipped: '+res.unknownBlocks.join(", ")+'</span>':"")+ 
     (res.outside?'<br><span style="color:var(--bad)">'+res.outside+" block(s) fell outside the area and were dropped.</span>":"")+
     (top>15?'<br><span style="color:var(--bad)">Heights above 15 are untested in the game. Use the Height test on the terrain page first.</span>':"");
   iso(cells,W,H);
