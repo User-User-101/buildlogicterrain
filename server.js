@@ -12,13 +12,13 @@ const PROVIDERS = {
     chat: GH + "/inference/chat/completions",
     models: GH + "/catalog/models",
     headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-    model: "openai/gpt-4.1", tokens: "max_tokens", altTokens: "max_completion_tokens",
+    model: "openai/gpt-4.1", tokens: "max_tokens", altTokens: "max_completion_tokens", limit: 4000,
   },
   groq: {
     chat: GROQ + "/chat/completions",
     models: GROQ + "/models",
     headers: {},
-    model: "llama-3.3-70b-versatile", tokens: "max_completion_tokens", altTokens: "max_tokens",
+    model: "llama-3.3-70b-versatile", tokens: "max_completion_tokens", altTokens: "max_tokens", limit: 6000,
   },
 };
 
@@ -77,7 +77,7 @@ app.post("/api/generate", async (req, res) => {
   try {
     let last;
     for (const v of variants) {
-      const body = { model, messages, [v.tok]: 6000 };
+      const body = { model, messages, [v.tok]: prov.limit };
       if (v.temp) body.temperature = 0.3;
       if (v.json) body.response_format = { type: "json_object" };
       const r = await call(prov, key, prov.chat, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
