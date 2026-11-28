@@ -197,11 +197,25 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     if(isOrdinary(x,y+1,0))n++;
     return n>=2;
   };
-  const wallScores=(x,y,z)=>({
-    // More ordinary blocks to either side means the wall runs along that axis.
-    x:(isOrdinary(x-1,y,z)?1:0)+(isOrdinary(x+1,y,z)?1:0),
-    y:(isOrdinary(x,y-1,z)?1:0)+(isOrdinary(x,y+1,z)?1:0)
-  });
+  const wallScores=(x,y,z)=>{
+    // Infer the wall direction from real wall cubes around the window opening.
+    // Looking only at the pane's exact height is fragile: the opening itself
+    // has no cubes, and wider windows may leave a gap on both sides. Sample
+    // nearby heights and up to three cells in both directions instead.
+    let sx=0,sy=0;
+    for(let dh=-1;dh<=2;dh++){
+      const zz=z+dh;if(zz<0||zz>=H)continue;
+      const verticalWeight=dh===0?3:(Math.abs(dh)===1?2:1);
+      for(let dist=1;dist<=3;dist++){
+        const weight=verticalWeight/(dist*dist);
+        if(isOrdinary(x-dist,y,zz))sx+=weight;
+        if(isOrdinary(x+dist,y,zz))sx+=weight;
+        if(isOrdinary(x,y-dist,zz))sy+=weight;
+        if(isOrdinary(x,y+dist,zz))sy+=weight;
+      }
+    }
+    return{x:sx,y:sy};
+  };
 
   // Place special items only after the structural cubes have been generated.
   // This lets furniture sit on top of a floor, and lets window panes replace
@@ -219,11 +233,18 @@ function voxelize(spec,W,D,H,maxCells,requestText=""){
     if(isFurniture){while(z<H&&isOrdinary(x,y,z))z++;}
     if(isPane){
       const sc=wallScores(x,y,z);
-      const axis=item.wallAxis|| (sc.x>sc.y?"x":sc.y>sc.x?"y":"");
-      if(axis==="x")item.rotation=[0,0,0];
-      else if(axis==="y")item.rotation=item.type==="Corner Pane"?[0,2,0]:[0,1,0];
-      // If the pane is on a corner or has no clear wall neighbors, retain the
-      // model's rotation rather than guessing.
+      const strongest=Math.max(sc.x,sc.y),difference=Math.abs(sc.x-sc.y);
+      // Trust the actual surrounding wall when it gives a clear direction.
+      // Only fall back to the model's hint when the geometry is tied or sparse.
+      let axis="";
+      if(strongest>=0.5&&difference>=0.2)axis=sc.x>sc.y?"x":"y";
+      else if(item.wallAxis==="x"||item.wallAxis==="y")axis=item.wallAxis;
+      else if(strongest>=0.5)axis=sc.x>=sc.y?"x":"y";
+      else axis="x"; // default pane plane; AI is instructed to give wallAxis for ambiguous corners
+      // Pane rotations are around Build Logic's vertical world-Y axis. The
+      // default pane lies along local X; a wall running along local depth Y
+      // needs one quarter-turn. Corner Pane uses the same axis rule.
+      item.rotation=axis==="y"?(item.type==="Corner Pane"?[0,2,0]:[0,1,0]):[0,0,0];
     }
     finalSpecials.push({...item,x,y,z});
   }
@@ -284,7 +305,7 @@ Format: {"name":"short name","parts":[ ... ]}. Allowed parts:
 {"shape":"line","from":[x,y,z],"to":[x,y,z],"thick":1,"color":"#b0b0b8"} (ordinary Block beam made from cubes, thick 1-3)
 {"shape":"sphere","cx":0,"cy":0,"cz":0,"rx":3,"ry":3,"rz":3,"color":"#cc5555"}
 {"shape":"cylinder","cx":0,"cy":0,"z":0,"r":2,"h":6,"color":"#999999"}
-{"shape":"block","type":"Pane","x":2,"y":0,"z":2,"wallAxis":"x","rotation":[0,0,0]} (one special Build Logic block; wallAxis is optional and may be x or y)
+{"shape":"block","type":"Pane","x":2,"y":0,"z":2,"wallAxis":"x"} (one special Build Logic block; wallAxis is the direction the wall runs along and is required for windows)
 Special block type values: ${Object.keys(BLOCKS).filter(k=>k!=="Block").join(", ")}.
 STRUCTURE RULES: Use ordinary Block cubes for all floors, walls, roofs, frames and foundations. Never use a chair, sign, pane, torch, plate, slab or pole as a substitute for an ordinary structural wall/floor cube. Do not overlap special objects with floors or walls except a Pane intentionally placed in a window opening. Avoid duplicate blocks at the same coordinates.
 FLOOR AND DOOR RULES: For a house, make a continuous floor at local z=0. Walls start at z=1. The Door is a single special block whose built-in model is 2 blocks tall; place its bottom at local z=1 (not z=0), leave the two wall cells at that x,y,z=1 and z=2 open, and continue the wall above z=2. Do not create a second block above or below the Door. The generator also moves a door out of an overlapping floor cell and clears only its 2-cell-tall doorway. Keep floor blocks at z=0 intact.
@@ -294,7 +315,7 @@ SIGN RULES: Never add a Sign or Sign 1x2 to an ordinary house unless the user sp
 OTHER DECORATION: Do not add torches unless the user asks for torches or lighting. Use Plate, Slab, poles and stair blocks only when they serve a clear design purpose; do not substitute them for wall cubes.
 For a special block use {"shape":"block","type":"Chair","x":2,"y":2,"z":1,"rotation":[0,1,0],"color":"#cc5555"}. Rotation is optional. Known useful rotations from supplied saves: Chair [0,1,0] or [0,0,0]; Door [0,1,0] or [0,0,0]; Sign [0,0,0] or [0,1,0]; Sign 1x2 [0,0,0] or [0,1,0]; Slab Chair [0,2,0] or [0,1,0]; Solid Chair [0,1,0] or [0,0,0]; Stair Chair [0,3,0] or [0,2,0]; Stair [0,0,0] or [0,1,0]; Trap Door [0,1,0] or [0,2,0]; Corner Pane [0,0,0] or [0,2,0]; Pane [0,0,0] or [0,1,0]; Plate [0,1,0] or [0,3,1]; Slab [0,1,0] or [0,1,1]; 3 Sides Pole [0,1,0] or [0,0,0]; 4 Sides Pole [0,1,0] or [0,2,0]; 4 Sides Pole 2 [0,2,0]; 5 Sides Pole [0,3,2]; 6 Sides Pole [0,3,2] (do not rotate this pole); Corner Pole [0,2,0] or [0,3,0]; Pole [0,3,0] or [0,3,3]; T Pole [0,3,3] or [0,0,3]. Rotation values are [rx,ry,rz], each 0-3. A rotated block is the same type with a different rotation, not a separate type.
 For signs, optionally add "text":"Hello". Colors are optional hex strings. When omitted on a special block, its native Build Logic color is preserved. Add "air":true to box/line/sphere/cylinder parts to carve out space.
-Design realistic proportions and provide enough space for doors and windows. For a small house, include a floor, walls with a proper doorway, a roof, and a few windows; do not add random furniture or signage. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
+Design realistic proportions and provide enough space for doors and windows. For a small house, do not return only a plain hollow cube. Make a recognizable home with a distinct front entrance, a roof that is visibly shaped (prefer a peaked/sloped roof using Stair blocks or stepped ordinary blocks rather than one flat solid slab), at least two windows on different exterior walls, and some exterior variation such as trim, a porch, or a chimney when space allows. Keep the inside hollow but do not make the exterior a featureless box. Put the door in the front wall at height z=1, with its two-cell opening clear. Put each Pane exactly in its wall opening and supply the correct wallAxis. Do not use signs, chairs, or torches unless requested. Use at most 40 parts and compact JSON (no comments, no extra text, no code fences). If the user asks for a change, return the full updated design.`}
 
 const PROV={groq:{label:"Groq API key",ph:"gsk_...",model:"llama-3.3-70b-versatile"},openrouter:{label:"OpenRouter API key",ph:"sk-or-...",model:"openrouter/free"}};
 const savedKey=p=>localStorage.getItem("key_"+p)||"";
@@ -377,7 +398,7 @@ $("test").onclick=async()=>{
     const good=d.status===200&&d.reply;
     setStatus(good?"Connection works. The model replied: "+d.reply:"The AI service answered HTTP "+d.status+(d.status===200?" with no text":"")+". Details are under Model output.",!good)}
   catch(e){setStatus(e.message,1)}};
-const PAGE_VERSION="r7";
+const PAGE_VERSION="r8";
 fetch("/api/version").then(r=>r.json()).then(v=>{$("ver").textContent="Page "+PAGE_VERSION+", server "+v.version+(v.version===PAGE_VERSION?"":" (mismatch: redeploy or hard refresh)")}).catch(()=>{$("ver").textContent="Page "+PAGE_VERSION+", server version unknown"});
 $("prov").onchange=applyProv;applyProv();
 </script>
